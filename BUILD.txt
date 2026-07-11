@@ -1,0 +1,25 @@
+PostSwap build stamp
+====================
+BUILD: 2026-07-11a
+DATE:  2026-07-11
+
+Redeploy checklist
+------------------
+1. Upload / publish these files from C:\Users\Paul\mutual-website:
+   - index.html
+   - supabase.js
+   - app.js
+   - styles.css
+   - supabase-schema.sql (optional docs)
+   - assets/* (logo, favicon, video)
+
+2. After deploy, hard refresh (Ctrl+F5).
+
+3. In DevTools console confirm:
+   PostSwapDB ready
+   PostSwapDB build: 2026-07-11a
+
+4. Probe inserts:
+   await PostSwapDB.testAnonInserts()
+
+Cache bust query on assets in index.html: ?v=20260711a

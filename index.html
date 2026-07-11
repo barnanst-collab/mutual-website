@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PostSwap — Mutual Route Transfers for USPS Carriers</title>
+  <meta name="description" content="The modern platform for USPS carriers seeking mutual transfers. Swap your route. Keep your benefits." />
+  <link rel="icon" href="assets/favicon.gif" type="image/gif" />
+  <link rel="shortcut icon" href="assets/favicon.gif" type="image/gif" />
+  <link rel="apple-touch-icon" href="assets/logo.gif" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <link rel="stylesheet" href="styles.css?v=20260711a" />
+  <meta name="postswap-build" content="2026-07-11a" />
+</head>
+<body>
+  <!-- Toast Container -->
+  <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+  <!-- Quick Post FAB — mobile only -->
+  <button
+    type="button"
+    class="fab-quick-post"
+    id="fab-quick-post"
+    data-action="open-post"
+    aria-label="Quick Post — post a swap"
+  >
+    <span class="fab-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round">
+        <path d="M12 5v14M5 12h14"/>
+      </svg>
+    </span>
+    <span class="fab-label">Quick Post</span>
+  </button>
+
+  <!-- Navbar -->
+  <header class="navbar" id="navbar">
+    <div class="navbar-inner">
+      <a href="#hero" class="logo" aria-label="PostSwap home">
+        <img src="assets/logo.gif" alt="PostSwap" class="logo-img logo-gif" width="200" height="72" />
+      </a>
+
+      <nav class="nav-links" id="nav-links" aria-label="Main">
+        <a href="#about" class="nav-link">About</a>
+        <a href="#regulations" class="nav-link">Regulations</a>
+        <a href="#explore" class="nav-link">Explore the Map</a>
+        <a href="#explore" class="nav-link" data-action="open-post">Post a Swap</a>
+      </nav>
+
+      <div class="nav-actions" id="nav-actions">
+        <!-- Guest state -->
+        <div class="auth-guest" id="auth-guest">
+          <button type="button" class="btn btn-ghost" data-action="open-login">Login</button>
+          <button type="button" class="btn btn-primary" data-action="open-register">Register</button>
+        </div>
+        <!-- Logged-in state -->
+        <div class="auth-user hidden" id="auth-user">
+          <button type="button" class="btn btn-ghost my-swaps-btn" data-action="show-my-swaps">My Swaps</button>
+
+          <!-- Animated USPS-style mailbox notifications -->
+          <div class="mailbox" id="mailbox">
+            <button
+              type="button"
+              class="mailbox-btn"
+              id="mailbox-btn"
+              aria-label="Notifications"
+              aria-haspopup="true"
+              aria-expanded="false"
+              aria-controls="mailbox-panel"
+            >
+              <span class="mailbox-visual" aria-hidden="true">
+                <!-- Post / stand -->
+                <svg class="mailbox-svg" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <!-- Pole -->
+                  <rect x="18.5" y="28" width="3" height="9" rx="1" fill="#003087"/>
+                  <!-- Base -->
+                  <rect x="14" y="36" width="12" height="2.5" rx="1" fill="#003087"/>
+                  <!-- Box body -->
+                  <rect class="mb-body" x="6" y="10" width="24" height="18" rx="3.5" fill="#003087"/>
+                  <!-- Door (white face) -->
+                  <rect class="mb-door" x="8.5" y="12.5" width="14" height="13" rx="2" fill="#FFFFFF" stroke="#E8EEF8" stroke-width="0.5"/>
+                  <!-- Door handle -->
+                  <circle cx="19.5" cy="19" r="1.2" fill="#B22234"/>
+                  <!-- Red flag arm -->
+                  <g class="mb-flag">
+                    <rect x="28" y="14" width="2.2" height="10" rx="0.8" fill="#94A3B8"/>
+                    <path d="M30 14.5 L37 17 L30 19.5 Z" fill="#B22234"/>
+                  </g>
+                  <!-- Roof cap -->
+                  <path d="M5 12.5 C5 9.5 8 7.5 12 7.5 H24 C28 7.5 31 9.5 31 12.5" fill="#00246b"/>
+                  <ellipse cx="18" cy="8.5" rx="3" ry="1.4" fill="#001f5c"/>
+                </svg>
+                <!-- Letters that pop into the box when unread -->
+                <span class="mb-letters">
+                  <span class="mb-letter mb-letter-1"></span>
+                  <span class="mb-letter mb-letter-2"></span>
+                  <span class="mb-letter mb-letter-3"></span>
+                </span>
+              </span>
+              <span class="mailbox-badge" id="mailbox-badge" hidden>0</span>
+            </button>
+
+            <div class="mailbox-panel" id="mailbox-panel" role="menu" aria-label="Notifications" hidden>
+              <div class="mailbox-panel-header">
+                <div>
+                  <h3>Mailbox</h3>
+                  <p class="mailbox-panel-sub">Carrier updates &amp; matches</p>
+                </div>
+                <button type="button" class="mailbox-close" id="mailbox-close" aria-label="Close notifications">×</button>
+              </div>
+              <div class="mailbox-list" id="mailbox-list"></div>
+              <div class="mailbox-panel-footer mailbox-panel-footer-row">
+                <button type="button" class="btn btn-primary btn-sm" id="mailbox-open-inbox" data-action="open-inbox">
+                  My Messages
+                </button>
+                <button type="button" class="link-btn" id="mailbox-mark-all">Mark all read</button>
+              </div>
+            </div>
+          </div>
+
+          <button type="button" class="user-chip user-chip-btn" data-action="open-profile" title="Open profile" aria-label="Open profile">
+            <span class="avatar" id="user-avatar">MC</span>
+            <span class="user-name" id="user-name">Maria C.</span>
+            <svg class="chip-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <button type="button" class="hamburger" id="hamburger" aria-label="Open menu" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+
+    <!-- Mobile menu -->
+    <div class="mobile-menu" id="mobile-menu" hidden>
+      <a href="#about" class="mobile-link">About</a>
+      <a href="#regulations" class="mobile-link">Regulations</a>
+      <a href="#explore" class="mobile-link">Explore the Map</a>
+      <a href="#explore" class="mobile-link" data-action="open-post">Post a Swap</a>
+      <div class="mobile-auth" id="mobile-auth">
+        <button type="button" class="btn btn-ghost btn-block" data-action="open-login">Login</button>
+        <button type="button" class="btn btn-primary btn-block" data-action="open-register">Register</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Hero -->
+    <section class="hero" id="hero">
+      <div class="hero-bg" aria-hidden="true">
+        <div class="hero-map-pattern"></div>
+      </div>
+
+      <div class="container hero-grid">
+        <!-- Animated LLV / logo — prominent visual -->
+        <div class="hero-visual" id="drive-truck-wrap">
+          <div class="hero-visual-glow" aria-hidden="true"></div>
+          <div class="hero-visual-card">
+            <video
+              id="truck-drive-video"
+              class="drive-video"
+              src="assets/truck-drive.mp4"
+              autoplay
+              muted
+              loop
+              playsinline
+              preload="auto"
+              poster="assets/logo.gif"
+            ></video>
+          </div>
+        </div>
+
+        <!-- Copy + CTAs -->
+        <div class="hero-copy">
+          <p class="hero-eyebrow">PostSwap for USPS carriers</p>
+          <h1 class="hero-title">
+            Find transfers.<br />
+            Swap stations.<br />
+            <span class="hero-title-accent">100% free.</span>
+          </h1>
+          <p class="hero-sub">
+            The modern platform connecting USPS carriers for mutual route transfers. Keep your seniority, benefits, and sanity.
+          </p>
+          <div class="hero-ctas">
+            <button type="button" class="btn btn-hero-primary btn-lg" data-action="open-post">
+              Post Your Swap
+            </button>
+            <a href="#explore" class="btn btn-hero-secondary btn-lg">Browse Open Swaps</a>
+          </div>
+          <p class="hero-trust-line">
+            Built by carriers <span aria-hidden="true">•</span> For carriers <span aria-hidden="true">•</span> USPS Verified Matching
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- About / How It Works -->
+    <section class="section about" id="about">
+      <div class="container">
+        <div class="section-header">
+          <p class="section-eyebrow">How it works</p>
+          <h2 class="section-title">Matching made simple — the official transfer stays with USPS</h2>
+          <p class="section-lead">PostSwap connects carriers who want to trade routes or positions. We handle discovery and conversation; you handle the paperwork through eReassign and official channels.</p>
+        </div>
+
+        <div class="steps-grid">
+          <article class="step-card">
+            <div class="step-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 5v14M5 12h14"/><rect x="3" y="3" width="18" height="18" rx="4"/></svg>
+            </div>
+            <span class="step-num">01</span>
+            <h3>Post your route</h3>
+            <p>Share your current location, craft, seniority, and what you’re looking for. Takes under a minute.</p>
+          </article>
+          <article class="step-card">
+            <div class="step-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M11 8v6M8 11h6"/></svg>
+            </div>
+            <span class="step-num">02</span>
+            <h3>Browse &amp; match</h3>
+            <p>Explore the map or list. Filter by craft, city, or region until you find the right fit.</p>
+          </article>
+          <article class="step-card">
+            <div class="step-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+            </div>
+            <span class="step-num">03</span>
+            <h3>Chat via DM</h3>
+            <p>Message matches directly. Confirm details, timelines, and expectations before you file.</p>
+          </article>
+          <article class="step-card">
+            <div class="step-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M9 12l2 2 4-4"/><path d="M12 22c5.5 0 10-4.5 10-10S17.5 2 12 2 2 6.5 2 12s4.5 10 10 10z"/></svg>
+            </div>
+            <span class="step-num">04</span>
+            <h3>File officially</h3>
+            <p>Take your match through eReassign and USPS policy. We never process transfers ourselves.</p>
+          </article>
+        </div>
+
+        <div class="safety-note">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+          <p><strong>Safety note:</strong> This platform is for matching only. All official transfers follow USPS rules and policies. Mutual swaps let everyone keep seniority and benefits!</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Official Regulations -->
+    <section class="section regulations" id="regulations">
+      <div class="container">
+        <div class="section-header">
+          <p class="section-eyebrow">Official guidance</p>
+          <h2 class="section-title">USPS transfer &amp; mutual exchange regulations</h2>
+          <p class="section-lead">PostSwap helps you find a match — the Postal Service and your collective bargaining agreement govern the actual transfer. Always verify current rules with your installation, union, and eReassign.</p>
+        </div>
+
+        <div class="regs-intro card-panel">
+          <div class="regs-intro-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>
+          </div>
+          <div>
+            <h3>Primary sources</h3>
+            <p>Mutual exchanges are governed primarily by <strong>Employee and Labor Relations Manual (ELM) Section 351.6</strong> (including 351.61), craft articles in the applicable National Agreement, and local installation-head approval. Voluntary reassignments often run through <strong>eReassign</strong>. This summary is educational only and is <strong>not legal or official USPS advice</strong>.</p>
+          </div>
+        </div>
+
+        <div class="regs-grid">
+          <article class="reg-card">
+            <div class="reg-card-num">ELM 351.61</div>
+            <h3>Mutual exchange — general policy</h3>
+            <p>Career employees may exchange positions (subject to the appropriate collective bargaining agreement) if the <strong>officials in charge at both installations approve</strong> the exchange.</p>
+            <ul class="reg-list">
+              <li>Exchanges must generally be between employees in positions at the <strong>same grade levels</strong>.</li>
+              <li>Approval is required at <strong>both</strong> installations — a match on PostSwap is not an approved transfer.</li>
+              <li>An exchange of positions does not always mean you automatically take over the other person’s exact duty assignment; local bidding and craft rules still apply.</li>
+            </ul>
+          </article>
+
+          <article class="reg-card">
+            <div class="reg-card-num">Restrictions</div>
+            <h3>Who may not exchange</h3>
+            <p>Under ELM 351.61, the following exchanges are <strong>not permitted</strong>:</p>
+            <ul class="reg-list">
+              <li><strong>Part-time flexible (PTF)</strong> employees with <strong>full-time</strong> employees</li>
+              <li><strong>Bargaining-unit</strong> employees with <strong>nonbargaining</strong> employees</li>
+              <li><strong>Nonsupervisory</strong> employees with <strong>supervisory</strong> employees</li>
+            </ul>
+            <p class="reg-note">Craft-specific MOUs can refine grade eligibility. For example, NALC MOU M-01646 treats city letter carrier grades CC-01 and CC-02 as the same grade <em>solely for mutual exchange eligibility</em>.</p>
+          </article>
+
+          <article class="reg-card">
+            <div class="reg-card-num">Seniority</div>
+            <h3>What happens to seniority</h3>
+            <p>Seniority in a mutual exchange is modified by craft contract language (e.g., city letter carriers under Article 41.2.E of the NALC National Agreement; similar provisions exist for other crafts such as APWU Articles 37 / 38 / 39).</p>
+            <ul class="reg-list">
+              <li>Carriers often <strong>retain their seniority or take the seniority of the other employee</strong>, depending on the specific contract rule for that craft — commonly the <strong>junior of the two</strong> applies in many mutuals.</li>
+              <li>Duty assignments and routes may still need to follow local posting/bid procedures after the exchange.</li>
+              <li>Confirm seniority impact with your steward <strong>before</strong> filing.</li>
+            </ul>
+          </article>
+
+          <article class="reg-card">
+            <div class="reg-card-num">eReassign</div>
+            <h3>Voluntary reassignment path</h3>
+            <p>If you are not doing a mutual exchange, voluntary transfers are commonly handled through <strong>eReassign</strong> (or written request to the installation head / HR where allowed).</p>
+            <ul class="reg-list">
+              <li>Career employees typically must complete a <strong>lock-in period</strong> (often cited as 12 or 18 months depending on circumstance) before a voluntary eReassign is eligible — verify current rules for your craft and installation.</li>
+              <li>eReassign requests are usually <strong>active for a limited time</strong> (commonly one year) unless acted on sooner.</li>
+              <li>Residual vacancies, conversion ratios, and craft MOUs can affect how openings are filled.</li>
+            </ul>
+          </article>
+
+          <article class="reg-card">
+            <div class="reg-card-num">Process</div>
+            <h3>Practical steps after you match</h3>
+            <ol class="reg-list numbered">
+              <li>Confirm both parties meet ELM / craft eligibility (grade, career status, PTF vs FTR, etc.).</li>
+              <li>Discuss timelines, stations, and expectations via DM — then move to official channels.</li>
+              <li>Seek <strong>installation head approval at both ends</strong> and follow local HR instructions.</li>
+              <li>File / process through eReassign or other official USPS procedures as directed.</li>
+              <li>Keep your union steward in the loop for seniority, bidding, and grievances if needed.</li>
+            </ol>
+          </article>
+
+          <article class="reg-card reg-card-accent">
+            <div class="reg-card-num">Disclaimer</div>
+            <h3>PostSwap’s role</h3>
+            <p>PostSwap is a <strong>matching and messaging tool only</strong>. We do not approve transfers, change seniority, process eReassign applications, or act on behalf of the United States Postal Service.</p>
+            <ul class="reg-list">
+              <li>Always use current ELM, National Agreement, JCAM / craft materials, and local management guidance.</li>
+              <li>Official references: <a href="https://about.usps.com/manuals/elm/html/elmc3_017.htm" target="_blank" rel="noopener noreferrer">ELM Section 350 (USPS)</a> and your craft union resources (e.g. NALC, APWU).</li>
+              <li>Rules change — treat this page as a starting point, not a substitute for official documents.</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- Explore Swaps -->
+    <section class="section explore" id="explore">
+      <div class="container">
+        <div class="section-header section-header-left">
+          <p class="section-eyebrow">Explore swaps</p>
+          <h2 class="section-title">Find your mutual match across the country</h2>
+          <p class="section-lead">Map and list stay in sync. Carriers stay private until you open a DM.</p>
+        </div>
+
+        <!-- Filters -->
+        <div class="filters-bar">
+          <div class="filter-group filter-search">
+            <label for="filter-city" class="sr-only">Search by city</label>
+            <div class="input-with-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+              <input type="search" id="filter-city" placeholder="Search by city or region…" autocomplete="off" />
+            </div>
+          </div>
+          <div class="filter-group">
+            <label for="filter-craft" class="sr-only">Craft</label>
+            <select id="filter-craft">
+              <option value="">All Crafts</option>
+              <option>Letter Carrier</option>
+              <option>Clerk</option>
+              <option>Mail Handler</option>
+              <option>Maintenance Mechanic</option>
+              <option>PSE</option>
+              <option>Supervisor</option>
+              <option>Rural Carrier</option>
+              <option>CCA</option>
+            </select>
+          </div>
+          <button type="button" class="btn btn-outline" id="near-me-btn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" aria-hidden="true"><path d="M12 2C8.1 2 5 5.1 5 9c0 5.2 7 13 7 13s7-7.8 7-13c0-3.9-3.1-7-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg>
+            Near Me
+          </button>
+          <button type="button" class="btn btn-primary" data-action="open-post">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+            Post a Swap
+          </button>
+        </div>
+
+        <div class="explore-layout" id="explore-layout">
+          <div class="explore-loading" id="explore-loading" hidden>
+            <div class="loading-spinner" aria-hidden="true"></div>
+            <p>Loading swaps from PostSwap…</p>
+          </div>
+          <div class="map-panel">
+            <div id="map" class="map" role="application" aria-label="Interactive map of swap requests"></div>
+          </div>
+          <div class="list-panel">
+            <div class="list-header">
+              <h3>Open Swaps</h3>
+              <span class="list-count" id="list-count">0 open</span>
+            </div>
+            <div class="swap-list" id="swap-list" tabindex="0"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CTA strip -->
+    <section class="cta-strip">
+      <div class="container cta-strip-inner">
+        <div>
+          <h2>Ready to find your match?</h2>
+          <p>Post your swap free. No fees, no pressure — just carriers helping carriers.</p>
+        </div>
+        <button type="button" class="btn btn-white btn-lg" data-action="open-post">Post Your Swap for Free</button>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container footer-inner">
+      <div class="footer-brand">
+        <a href="#hero" class="logo logo-sm">
+          <img src="assets/logo.gif" alt="PostSwap" class="logo-img logo-img-sm logo-gif" width="160" height="56" />
+        </a>
+        <p>Matching only. Transfers go through official USPS channels.</p>
+      </div>
+      <div class="footer-links">
+        <a href="#about">About</a>
+        <a href="#regulations">Regulations</a>
+        <a href="#explore">Explore</a>
+        <button type="button" class="link-btn" data-action="open-post">Post a Swap</button>
+      </div>
+      <p class="footer-copy">© 2026 PostSwap. Not affiliated with the United States Postal Service. Transfer rules summary is for education only.</p>
+    </div>
+  </footer>
+
+  <!-- ========== MODALS ========== -->
+
+  <!-- Overlay -->
+  <div class="modal-overlay" id="modal-overlay" hidden></div>
+
+  <!-- Post Swap Modal -->
+  <div class="modal" id="modal-post" role="dialog" aria-labelledby="post-title" aria-modal="true" hidden>
+    <div class="modal-header">
+      <div>
+        <h2 id="post-title">Post Your Swap</h2>
+        <p class="modal-sub">Mutual swaps let everyone keep seniority and benefits!</p>
+      </div>
+      <button type="button" class="modal-close" data-action="close-modal" aria-label="Close">×</button>
+    </div>
+    <form id="form-post" class="modal-body form">
+      <div class="form-row">
+        <label for="post-current">Current Location</label>
+        <div class="input-row">
+          <input type="text" id="post-current" name="current" placeholder="e.g. North Las Vegas, NV" required />
+          <button type="button" class="btn btn-outline btn-sm" id="use-location-btn">Use my location</button>
+        </div>
+      </div>
+      <div class="form-row">
+        <label for="post-desired">Desired Location</label>
+        <input type="text" id="post-desired" name="desired" placeholder='e.g. Phoenix, AZ or "Anywhere in the Southwest"' required />
+      </div>
+      <div class="form-row two-col">
+        <div>
+          <label for="post-craft">Craft / Position</label>
+          <select id="post-craft" name="craft" required>
+            <option value="">Select craft…</option>
+            <option>Letter Carrier</option>
+            <option>Clerk</option>
+            <option>Mail Handler</option>
+            <option>Maintenance Mechanic</option>
+            <option>PSE</option>
+            <option>Supervisor</option>
+            <option>Rural Carrier</option>
+            <option>CCA</option>
+          </select>
+        </div>
+        <div>
+          <label for="post-seniority">Years of Seniority</label>
+          <input type="number" id="post-seniority" name="seniority" min="0" max="50" step="0.5" placeholder="e.g. 8" required />
+        </div>
+      </div>
+      <div class="form-row">
+        <label>Swap Type</label>
+        <div class="radio-group">
+          <label class="radio-card"><input type="radio" name="swapType" value="Permanent" checked /><span>Permanent</span></label>
+          <label class="radio-card"><input type="radio" name="swapType" value="Temporary" /><span>Temporary</span></label>
+          <label class="radio-card"><input type="radio" name="swapType" value="Either" /><span>Either</span></label>
+        </div>
+      </div>
+      <div class="form-row">
+        <label for="post-notes">Additional notes</label>
+        <textarea id="post-notes" name="notes" rows="3" placeholder="Walking route, vehicle, schedule preferences, timeline…"></textarea>
+      </div>
+      <button type="submit" class="btn btn-primary btn-lg btn-block" id="post-submit-btn">
+        <span class="btn-label">Post My Swap</span>
+        <span class="btn-loading" hidden>
+          <span class="loading-spinner loading-spinner-sm" aria-hidden="true"></span>
+          Saving…
+        </span>
+      </button>
+    </form>
+  </div>
+
+  <!-- DM Modal -->
+  <div class="modal modal-chat" id="modal-dm" role="dialog" aria-labelledby="dm-title" aria-modal="true" hidden>
+    <div class="modal-header chat-header">
+      <div class="chat-peer">
+        <span class="avatar avatar-md" id="dm-avatar">VC</span>
+        <div>
+          <h2 id="dm-title">Verified Carrier</h2>
+          <p class="modal-sub" id="dm-subtitle">Southwest Region</p>
+        </div>
+      </div>
+      <button type="button" class="modal-close" data-action="close-modal" aria-label="Close">×</button>
+    </div>
+    <div class="chat-body" id="chat-body"></div>
+    <form class="chat-compose" id="form-dm">
+      <input type="text" id="dm-input" placeholder="Write a friendly message…" autocomplete="off" />
+      <button type="submit" class="btn btn-primary">Send</button>
+    </form>
+  </div>
+
+  <!-- Login Modal -->
+  <div class="modal modal-sm" id="modal-login" role="dialog" aria-labelledby="login-title" aria-modal="true" hidden>
+    <div class="modal-header">
+      <div>
+        <h2 id="login-title">Welcome back</h2>
+        <p class="modal-sub">Log in to manage your swaps and message matches.</p>
+      </div>
+      <button type="button" class="modal-close" data-action="close-modal" aria-label="Close">×</button>
+    </div>
+    <form id="form-login" class="modal-body form">
+      <div class="form-row">
+        <label for="login-email">Email</label>
+        <input type="email" id="login-email" placeholder="you@email.com" required />
+      </div>
+      <div class="form-row">
+        <label for="login-password">Password</label>
+        <input type="password" id="login-password" placeholder="••••••••" required />
+      </div>
+      <button type="submit" class="btn btn-primary btn-lg btn-block">Log In</button>
+      <div class="divider-or"><span>or</span></div>
+      <button type="button" class="btn btn-outline btn-lg btn-block" id="demo-login-btn">Login with Demo Account</button>
+      <p class="form-footer">New here? <button type="button" class="link-btn" data-action="open-register">Create an account</button></p>
+    </form>
+  </div>
+
+  <!-- Register Modal -->
+  <div class="modal" id="modal-register" role="dialog" aria-labelledby="register-title" aria-modal="true" hidden>
+    <div class="modal-header">
+      <div>
+        <h2 id="register-title">Join PostSwap</h2>
+        <p class="modal-sub">Free for carriers. Built to respect the job.</p>
+      </div>
+      <button type="button" class="modal-close" data-action="close-modal" aria-label="Close">×</button>
+    </div>
+    <form id="form-register" class="modal-body form">
+      <div class="form-row two-col">
+        <div>
+          <label for="reg-name">Full Name</label>
+          <input type="text" id="reg-name" placeholder="Maria Chen" required />
+        </div>
+        <div>
+          <label for="reg-email">Email</label>
+          <input type="email" id="reg-email" placeholder="you@email.com" required />
+        </div>
+      </div>
+      <div class="form-row">
+        <label for="reg-eid">USPS Employee ID <span class="label-hint">(demo)</span></label>
+        <input type="text" id="reg-eid" placeholder="e.g. 12345678" required />
+      </div>
+      <div class="form-row two-col">
+        <div>
+          <label for="reg-craft">Craft</label>
+          <select id="reg-craft" required>
+            <option value="">Select…</option>
+            <option>Letter Carrier</option>
+            <option>Clerk</option>
+            <option>Mail Handler</option>
+            <option>Maintenance Mechanic</option>
+            <option>PSE</option>
+            <option>Supervisor</option>
+            <option>Rural Carrier</option>
+            <option>CCA</option>
+          </select>
+        </div>
+        <div>
+          <label for="reg-station">Current Station</label>
+          <input type="text" id="reg-station" placeholder="North Las Vegas Main" required />
+        </div>
+      </div>
+      <div class="form-row">
+        <label for="reg-password">Password</label>
+        <input type="password" id="reg-password" placeholder="Create a password" minlength="6" required />
+      </div>
+      <button type="submit" class="btn btn-primary btn-lg btn-block">Create Account</button>
+      <p class="form-footer">Already have an account? <button type="button" class="link-btn" data-action="open-login">Log in</button></p>
+    </form>
+  </div>
+
+  <!-- My Swaps Modal -->
+  <div class="modal" id="modal-my-swaps" role="dialog" aria-labelledby="my-swaps-title" aria-modal="true" hidden>
+    <div class="modal-header">
+      <div>
+        <h2 id="my-swaps-title">My Posted Swaps</h2>
+        <p class="modal-sub">Swaps you’ve listed on PostSwap</p>
+      </div>
+      <button type="button" class="modal-close" data-action="close-modal" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body" id="my-swaps-body"></div>
+  </div>
+
+  <!-- My Messages Inbox Modal -->
+  <div class="modal modal-inbox" id="modal-inbox" role="dialog" aria-labelledby="inbox-title" aria-modal="true" hidden>
+    <div class="modal-header">
+      <div>
+        <h2 id="inbox-title">My Messages</h2>
+        <p class="modal-sub">DMs grouped by swap conversation</p>
+      </div>
+      <button type="button" class="modal-close" data-action="close-modal" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body inbox-body">
+      <div class="inbox-toolbar">
+        <button type="button" class="btn btn-outline btn-sm" id="inbox-refresh" title="Refresh inbox">
+          Refresh
+        </button>
+        <span class="inbox-hint" id="inbox-status">Loading…</span>
+      </div>
+      <div class="inbox-layout">
+        <div class="inbox-threads" id="inbox-threads" role="list"></div>
+        <div class="inbox-thread-view" id="inbox-thread-view">
+          <div class="inbox-empty-thread" id="inbox-empty-thread">
+            <div class="mailbox-empty-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+            </div>
+            <p><strong>Select a conversation</strong><br />Messages for each swap appear here.</p>
+          </div>
+          <div class="inbox-thread-panel" id="inbox-thread-panel" hidden>
+            <div class="inbox-thread-header">
+              <div>
+                <h3 id="inbox-thread-title">Swap</h3>
+                <p class="modal-sub" id="inbox-thread-sub"></p>
+              </div>
+              <button type="button" class="btn btn-primary btn-sm" id="inbox-open-dm">Open full chat</button>
+            </div>
+            <div class="inbox-thread-messages" id="inbox-thread-messages"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Share Swap Modal -->
+  <div class="modal modal-share" id="modal-share" role="dialog" aria-labelledby="share-title" aria-modal="true" hidden>
+    <div class="modal-header">
+      <div>
+        <h2 id="share-title">Share this swap</h2>
+        <p class="modal-sub">Send to a buddy who might want this route!</p>
+      </div>
+      <button type="button" class="modal-close" data-action="close-modal" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body share-body">
+      <div class="share-hint">
+        <span class="share-hint-icon" aria-hidden="true">
+          <svg viewBox="0 0 40 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="2" y="8" width="26" height="14" rx="2.5" fill="#FFFFFF" stroke="#003087" stroke-width="1.8"/>
+            <path d="M28 12h6c1.5 0 2.5 1 2.5 2.5V22H28V12z" fill="#FFFFFF" stroke="#003087" stroke-width="1.6"/>
+            <rect x="4" y="14" width="22" height="2.2" fill="#003087"/>
+            <rect x="4" y="16.5" width="22" height="1.2" fill="#B22234"/>
+            <circle cx="10" cy="23" r="2.8" fill="#1a2744"/>
+            <circle cx="24" cy="23" r="2.8" fill="#1a2744"/>
+            <rect x="12" y="2" width="6" height="5" rx="1" fill="#003087"/>
+            <rect x="19" y="3" width="7" height="4" rx="1" fill="#B22234"/>
+          </svg>
+        </span>
+        <p>Paste into a text, carrier group chat, or union thread — mutual swaps help everyone keep seniority &amp; benefits.</p>
+      </div>
+
+      <label class="share-label" for="share-message">Message ready to copy</label>
+      <textarea id="share-message" class="share-message" rows="5" readonly></textarea>
+
+      <div class="share-actions">
+        <button type="button" class="share-action-btn share-copy" id="share-copy-msg">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+          <span>Copy Message</span>
+        </button>
+        <button type="button" class="share-action-btn share-link" id="share-copy-link">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
+          <span>Copy Link</span>
+        </button>
+        <button type="button" class="share-action-btn share-email" id="share-email">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 4h16v16H4z"/><path d="M22 6l-10 7L2 6"/></svg>
+          <span>Share via Email</span>
+        </button>
+        <button type="button" class="share-action-btn share-group" id="share-group">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+          <span>Share to Carrier Group Chat</span>
+        </button>
+      </div>
+      <p class="share-foot" id="share-status" aria-live="polite"></p>
+    </div>
+  </div>
+
+  <!-- Profile & Notifications Modal -->
+  <div class="modal modal-profile" id="modal-profile" role="dialog" aria-labelledby="profile-title" aria-modal="true" hidden>
+    <div class="modal-header">
+      <div>
+        <h2 id="profile-title">Your Profile</h2>
+        <p class="modal-sub">Account details and email notifications</p>
+      </div>
+      <button type="button" class="modal-close" data-action="close-modal" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body profile-body">
+      <div class="profile-identity">
+        <span class="avatar avatar-lg" id="profile-avatar">MC</span>
+        <div>
+          <h3 id="profile-name">Maria Chen</h3>
+          <p id="profile-meta" class="profile-meta">Letter Carrier · North Las Vegas Main</p>
+        </div>
+      </div>
+
+      <form id="form-profile" class="form">
+        <div class="profile-section">
+          <h4 class="profile-section-title">Account</h4>
+          <div class="form-row">
+            <label for="profile-email">Personal email for notifications</label>
+            <input type="email" id="profile-email" name="email" placeholder="you@email.com" required />
+            <p class="field-hint">We’ll send alerts only to this address — never shared publicly on your swap card.</p>
+          </div>
+          <div class="form-row two-col">
+            <div>
+              <label for="profile-craft">Craft</label>
+              <select id="profile-craft">
+                <option>Letter Carrier</option>
+                <option>Clerk</option>
+                <option>Mail Handler</option>
+                <option>Maintenance Mechanic</option>
+                <option>PSE</option>
+                <option>Supervisor</option>
+                <option>Rural Carrier</option>
+                <option>CCA</option>
+              </select>
+            </div>
+            <div>
+              <label for="profile-station">Current Station</label>
+              <input type="text" id="profile-station" placeholder="Station name" />
+            </div>
+          </div>
+          <div class="form-row">
+            <label for="profile-state">Home state (for “new swap in my state”)</label>
+            <select id="profile-state">
+              <option value="">Select state…</option>
+              <option value="AL">Alabama</option>
+              <option value="AK">Alaska</option>
+              <option value="AZ">Arizona</option>
+              <option value="AR">Arkansas</option>
+              <option value="CA">California</option>
+              <option value="CO">Colorado</option>
+              <option value="CT">Connecticut</option>
+              <option value="DE">Delaware</option>
+              <option value="FL">Florida</option>
+              <option value="GA">Georgia</option>
+              <option value="HI">Hawaii</option>
+              <option value="ID">Idaho</option>
+              <option value="IL">Illinois</option>
+              <option value="IN">Indiana</option>
+              <option value="IA">Iowa</option>
+              <option value="KS">Kansas</option>
+              <option value="KY">Kentucky</option>
+              <option value="LA">Louisiana</option>
+              <option value="ME">Maine</option>
+              <option value="MD">Maryland</option>
+              <option value="MA">Massachusetts</option>
+              <option value="MI">Michigan</option>
+              <option value="MN">Minnesota</option>
+              <option value="MS">Mississippi</option>
+              <option value="MO">Missouri</option>
+              <option value="MT">Montana</option>
+              <option value="NE">Nebraska</option>
+              <option value="NV">Nevada</option>
+              <option value="NH">New Hampshire</option>
+              <option value="NJ">New Jersey</option>
+              <option value="NM">New Mexico</option>
+              <option value="NY">New York</option>
+              <option value="NC">North Carolina</option>
+              <option value="ND">North Dakota</option>
+              <option value="OH">Ohio</option>
+              <option value="OK">Oklahoma</option>
+              <option value="OR">Oregon</option>
+              <option value="PA">Pennsylvania</option>
+              <option value="RI">Rhode Island</option>
+              <option value="SC">South Carolina</option>
+              <option value="SD">South Dakota</option>
+              <option value="TN">Tennessee</option>
+              <option value="TX">Texas</option>
+              <option value="UT">Utah</option>
+              <option value="VT">Vermont</option>
+              <option value="VA">Virginia</option>
+              <option value="WA">Washington</option>
+              <option value="WV">West Virginia</option>
+              <option value="WI">Wisconsin</option>
+              <option value="WY">Wyoming</option>
+              <option value="DC">District of Columbia</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="profile-section">
+          <h4 class="profile-section-title">Email notifications</h4>
+          <p class="profile-section-lead">Choose what reaches your personal inbox. You can change these anytime.</p>
+
+          <div class="notify-master">
+            <label class="toggle-row master-toggle">
+              <div class="toggle-copy">
+                <strong>Send notifications to my email</strong>
+                <span>Master switch — must be on for any email alerts below</span>
+              </div>
+              <input type="checkbox" id="notify-email-enabled" class="toggle-input" checked />
+              <span class="toggle-switch" aria-hidden="true"></span>
+            </label>
+          </div>
+
+          <div class="notify-options" id="notify-options">
+            <label class="toggle-row">
+              <div class="toggle-copy">
+                <strong>Someone is interested in my swap</strong>
+                <span>Email me when a carrier taps “I’m Interested” on one of my listings</span>
+              </div>
+              <input type="checkbox" id="notify-interest" class="toggle-input" checked />
+              <span class="toggle-switch" aria-hidden="true"></span>
+            </label>
+
+            <label class="toggle-row">
+              <div class="toggle-copy">
+                <strong>New swap in my state</strong>
+                <span>Email me when a new mutual request is posted in my home state</span>
+              </div>
+              <input type="checkbox" id="notify-state" class="toggle-input" checked />
+              <span class="toggle-switch" aria-hidden="true"></span>
+            </label>
+
+            <label class="toggle-row">
+              <div class="toggle-copy">
+                <strong>New DM message</strong>
+                <span>Email me when I receive a direct message about a swap</span>
+              </div>
+              <input type="checkbox" id="notify-dm" class="toggle-input" checked />
+              <span class="toggle-switch" aria-hidden="true"></span>
+            </label>
+          </div>
+
+          <div class="notify-preview" id="notify-preview" aria-live="polite">
+            <span class="notify-preview-icon" aria-hidden="true">✉</span>
+            <p>Alerts will go to <strong id="notify-preview-email">your email</strong>.</p>
+          </div>
+        </div>
+
+        <div class="profile-actions">
+          <button type="submit" class="btn btn-primary btn-lg btn-block">Save profile &amp; notifications</button>
+          <div class="profile-secondary-actions">
+            <button type="button" class="btn btn-outline" data-action="show-my-swaps">My Swaps</button>
+            <button type="button" class="btn btn-ghost" data-action="logout">Log out</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <!-- cache-bust so hard refresh always gets latest scripts -->
+  <script src="supabase.js?v=20260711b"></script>
+  <script src="app.js?v=20260711b"></script>
+  <script>
+    // Available immediately after page scripts load
+    (function () {
+      if (window.PostSwapDB && typeof window.PostSwapDB.testAnonInserts === "function") {
+        console.log("PostSwapDB ready");
+        console.log(
+          "PostSwapDB build:",
+          window.PostSwapDB.BUILD,
+          "· await PostSwapDB.testAnonInserts()"
+        );
+      } else {
+        console.error("PostSwapDB / testAnonInserts missing", {
+          PostSwapDB: window.PostSwapDB,
+          keys: window.PostSwapDB ? Object.keys(window.PostSwapDB) : [],
+        });
+      }
+    })();
+  </script>
+</body>
+</html>
+
+
+

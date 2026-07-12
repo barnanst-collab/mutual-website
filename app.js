@@ -24,151 +24,7 @@
 (function () {
   "use strict";
 
-  // ---------- Sample swap data ----------
-  const INITIAL_SWAPS = [
-    {
-      id: 1,
-      current: "North Las Vegas, NV",
-      desired: "Phoenix, AZ",
-      craft: "Letter Carrier",
-      seniority: 9,
-      swapType: "Permanent",
-      notes: "Walking route preferred. Looking to be closer to family in the Valley of the Sun.",
-      lat: 36.1989,
-      lng: -115.1175,
-      region: "Southwest Region",
-      privacyLabel: "Verified Carrier • Southwest Region",
-      ownerId: null,
-    },
-    {
-      id: 2,
-      current: "Phoenix, AZ",
-      desired: "North Las Vegas, NV",
-      craft: "Letter Carrier",
-      seniority: 12,
-      swapType: "Permanent",
-      notes: "Mounted route OK. Ready to file via eReassign as soon as we match.",
-      lat: 33.4484,
-      lng: -112.074,
-      region: "Southwest Region",
-      privacyLabel: "Verified Carrier • Phoenix Metro",
-      ownerId: null,
-    },
-    {
-      id: 3,
-      current: "Tucson, AZ",
-      desired: "Las Vegas, NV",
-      craft: "Clerk",
-      seniority: 7,
-      swapType: "Either",
-      notes: "Window clerk experience. Open to retail or distribution.",
-      lat: 32.2226,
-      lng: -110.9747,
-      region: "Southwest Region",
-      privacyLabel: "Verified Carrier • Southwest Region",
-      ownerId: null,
-    },
-    {
-      id: 4,
-      current: "Henderson, NV",
-      desired: "Anywhere in the Southwest",
-      craft: "Mail Handler",
-      seniority: 5,
-      swapType: "Permanent",
-      notes: "Flexible on city — prefer Arizona or Southern California plants.",
-      lat: 36.0395,
-      lng: -114.9817,
-      region: "Southwest Region",
-      privacyLabel: "Verified Carrier • Las Vegas Metro",
-      ownerId: null,
-    },
-    {
-      id: 5,
-      current: "Mesa, AZ",
-      desired: "North Las Vegas, NV",
-      craft: "Letter Carrier",
-      seniority: 15,
-      swapType: "Permanent",
-      notes: "Long-time carrier seeking cooler summers and family nearby.",
-      lat: 33.4152,
-      lng: -111.8315,
-      region: "Southwest Region",
-      privacyLabel: "Verified Carrier • Phoenix Metro",
-      ownerId: null,
-    },
-    {
-      id: 6,
-      current: "Denver, CO",
-      desired: "Phoenix, AZ",
-      craft: "Rural Carrier",
-      seniority: 6,
-      swapType: "Temporary",
-      notes: "Would consider 6–12 month temporary first, then permanent.",
-      lat: 39.7392,
-      lng: -104.9903,
-      region: "Mountain West",
-      privacyLabel: "Verified Carrier • Mountain West",
-      ownerId: null,
-    },
-    {
-      id: 7,
-      current: "Dallas, TX",
-      desired: "Tucson, AZ",
-      craft: "Maintenance Mechanic",
-      seniority: 11,
-      swapType: "Permanent",
-      notes: "MM-7. Strong PM experience. Looking for desert living.",
-      lat: 32.7767,
-      lng: -96.797,
-      region: "South Central",
-      privacyLabel: "Verified Carrier • South Central",
-      ownerId: null,
-    },
-    {
-      id: 8,
-      current: "San Diego, CA",
-      desired: "Las Vegas, NV",
-      craft: "Letter Carrier",
-      seniority: 4,
-      swapType: "Permanent",
-      notes: "CCA converting soon / lower seniority OK if mutual works.",
-      lat: 32.7157,
-      lng: -117.1611,
-      region: "Pacific",
-      privacyLabel: "Verified Carrier • Pacific Region",
-      ownerId: null,
-    },
-    {
-      id: 9,
-      current: "Chicago, IL",
-      desired: "Phoenix, AZ",
-      craft: "Supervisor",
-      seniority: 18,
-      swapType: "Permanent",
-      notes: "204-B / EAS interested in warmer climate and lower cost of living.",
-      lat: 41.8781,
-      lng: -87.6298,
-      region: "Great Lakes",
-      privacyLabel: "Verified Carrier • Great Lakes",
-      ownerId: null,
-    },
-    {
-      id: 10,
-      current: "Atlanta, GA",
-      desired: "Anywhere in the Southwest",
-      craft: "PSE",
-      seniority: 3,
-      swapType: "Either",
-      notes: "PSE with solid attendance. Open to conversion path conversations.",
-      lat: 33.749,
-      lng: -84.388,
-      region: "Southeast",
-      privacyLabel: "Verified Carrier • Southeast Region",
-      ownerId: null,
-    },
-  ];
-
-  // City geocode hints for new posts (demo)
+  // City geocode hints for map pins when posting (not seed swap data)
   const CITY_COORDS = {
     "north las vegas": { lat: 36.1989, lng: -115.1175 },
     "las vegas": { lat: 36.1699, lng: -115.1398 },
@@ -222,34 +78,30 @@
 
   async function loadSwapsFromSupabase() {
     setExploreLoading(true);
+    swaps = [];
     try {
-      if (!useSupabase || !db()) throw new Error("Supabase helper missing");
-      const remote = await db().fetchSwaps();
-      if (remote && remote.length) {
-        swaps = remote;
+      if (!useSupabase || !db()) {
+        console.warn("[PostSwap] Supabase helper missing — starting with empty swaps");
         swapsLoaded = true;
         refreshViews();
-        return { ok: true, source: "supabase", count: remote.length };
+        return { ok: false, source: "none", count: 0 };
       }
-      // Empty table — show seed-style fallback so UI isn't blank
-      swaps = INITIAL_SWAPS.map((s) => ({ ...s }));
+      const remote = await db().fetchSwaps();
+      swaps = Array.isArray(remote) ? remote : [];
       swapsLoaded = true;
       refreshViews();
-      showToast(
-        "No remote swaps yet",
-        "Your Supabase table is empty. Sample swaps shown — post one to save live data."
-      );
-      return { ok: true, source: "empty", count: 0 };
+      console.log("[PostSwap] loaded swaps from Supabase:", swaps.length);
+      return { ok: true, source: "supabase", count: swaps.length };
     } catch (err) {
-      console.warn("Supabase fetch failed, using local sample data:", err);
-      swaps = INITIAL_SWAPS.map((s) => ({ ...s }));
+      console.error("[PostSwap] Supabase fetch failed — empty swaps list", err);
+      swaps = [];
       swapsLoaded = true;
       refreshViews();
       showToast(
-        "Offline / setup needed",
-        "Couldn’t load Supabase. Showing sample data. Run supabase-schema.sql in your project."
+        "Couldn’t load swaps",
+        "Check Supabase connection. The list is empty until data loads or you post a swap."
       );
-      return { ok: false, error: err };
+      return { ok: false, error: err, count: 0 };
     } finally {
       setExploreLoading(false);
     }

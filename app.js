@@ -1137,18 +1137,93 @@
   }
 
   let shareSwap = null;
+  let shareMode = "swap"; // "swap" | "site"
+  const SITE_URL = "https://post-swap.com";
+  const SITE_SHARE_TEXT =
+    "Hey — check out PostSwap, a free site for USPS carriers to find mutual route/station transfers. " +
+    "Keep your seniority and benefits. Built by carriers, for carriers.\n\n" +
+    SITE_URL;
 
   function setShareStatus(msg) {
     if (els.shareStatus) els.shareStatus.textContent = msg || "";
   }
 
+  function getSharePayload() {
+    if (shareMode === "site" || !shareSwap) {
+      return {
+        message: SITE_SHARE_TEXT,
+        link: SITE_URL,
+        subject: "PostSwap — free mutual transfers for USPS carriers",
+        groupText:
+          "🚚 Carrier buddy share:\n\n" +
+          SITE_SHARE_TEXT +
+          "\n\nMutual swaps help everyone keep seniority & benefits — pass it along!",
+      };
+    }
+    return {
+      message: buildShareText(shareSwap),
+      link: shareUrlFor(shareSwap),
+      subject: `USPS route swap: ${shareSwap.current} → ${shareSwap.desired}`,
+      groupText:
+        `🚚 Carrier group share:\n\n${buildShareText(shareSwap)}\n\n` +
+        `Mutual swaps help everyone keep seniority & benefits — pass it along!`,
+    };
+  }
+
+  function configureShareModal(mode) {
+    shareMode = mode;
+    const title = $("#share-title");
+    const sub = $("#share-subtitle");
+    const hint = $("#share-hint-text");
+    if (mode === "site") {
+      if (title) title.textContent = "Share PostSwap with a carrier buddy";
+      if (sub) sub.textContent = "Send the site link — free mutual transfers for USPS carriers.";
+      if (hint) {
+        hint.textContent =
+          "Paste into a text, group chat, or break-room board. Link goes to post-swap.com.";
+      }
+      if (els.shareMessage) els.shareMessage.value = SITE_SHARE_TEXT;
+    } else {
+      if (title) title.textContent = "Share this swap";
+      if (sub) sub.textContent = "Send to a buddy who might want this route!";
+      if (hint) {
+        hint.textContent =
+          "Paste into a text, carrier group chat, or union thread — mutual swaps help everyone keep seniority & benefits.";
+      }
+    }
+    setShareStatus("");
+  }
+
   function openShare(swap) {
     shareSwap = swap;
+    configureShareModal("swap");
     if (els.shareMessage) {
       els.shareMessage.value = buildShareText(swap);
     }
-    setShareStatus("");
     openModal(els.modalShare);
+  }
+
+  function openShareSite() {
+    shareSwap = null;
+    configureShareModal("site");
+    closeMobileMenu();
+    openModal(els.modalShare);
+
+    // Native share sheet when available (mobile)
+    if (typeof navigator !== "undefined" && typeof navigator.share === "function") {
+      navigator
+        .share({
+          title: "PostSwap",
+          text: SITE_SHARE_TEXT,
+          url: SITE_URL,
+        })
+        .then(() => {
+          setShareStatus("Shared via your device — thanks for spreading the word!");
+        })
+        .catch(() => {
+          /* user cancelled — modal stays open for copy options */
+        });
+    }
   }
 
   async function copyText(text, successMsg) {
@@ -1600,6 +1675,11 @@
         closeMobileMenu();
         openInbox();
         break;
+      case "open-share-site":
+        e.preventDefault();
+        closeMobileMenu();
+        openShareSite();
+        break;
       default:
         break;
     }
@@ -1726,37 +1806,31 @@
       }
     });
 
-    // Share modal actions
+    // Share modal actions (site or individual swap)
     if (els.shareCopyMsg) {
       els.shareCopyMsg.addEventListener("click", () => {
-        if (!shareSwap) return;
-        copyText(buildShareText(shareSwap), "Message copied — paste into a text or group chat.");
+        const p = getSharePayload();
+        copyText(p.message, "Message copied — paste into a text or group chat.");
       });
     }
     if (els.shareCopyLink) {
       els.shareCopyLink.addEventListener("click", () => {
-        if (!shareSwap) return;
-        copyText(shareUrlFor(shareSwap), "Link copied to clipboard.");
+        const p = getSharePayload();
+        copyText(p.link, "Link copied to clipboard.");
       });
     }
     if (els.shareEmail) {
       els.shareEmail.addEventListener("click", () => {
-        if (!shareSwap) return;
-        const body = buildShareText(shareSwap);
-        const subject = `USPS route swap: ${shareSwap.current} → ${shareSwap.desired}`;
-        // Also copy so they can paste if mailto is blocked
-        copyText(body, "Message copied · opening email…");
+        const p = getSharePayload();
+        copyText(p.message, "Message copied · opening email…");
         window.location.href =
-          `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+          `mailto:?subject=${encodeURIComponent(p.subject)}&body=${encodeURIComponent(p.message)}`;
       });
     }
     if (els.shareGroup) {
       els.shareGroup.addEventListener("click", () => {
-        if (!shareSwap) return;
-        const text =
-          `🚚 Carrier group share:\n\n${buildShareText(shareSwap)}\n\n` +
-          `Mutual swaps help everyone keep seniority & benefits — pass it along!`;
-        copyText(text, "Group-chat text copied — paste into your carrier group.");
+        const p = getSharePayload();
+        copyText(p.groupText, "Group-chat text copied — paste into your carrier group.");
       });
     }
 

@@ -1497,6 +1497,28 @@
           body: text,
         });
         console.log("[PostSwap] sendDm: saved", savedMsg);
+
+        // Email notification → swap owner (profiles + email_queue)
+        if (typeof db().notifyNewDm === "function") {
+          try {
+            const notify = await db().notifyNewDm({
+              swap: currentDmSwap,
+              messageBody: text,
+              fromUser: user || { id: "guest", name: "A verified carrier" },
+            });
+            console.log("[PostSwap] sendDm: email notify", notify);
+            if (notify && notify.queued > 0) {
+              showToast(
+                "Email notification queued",
+                notify.to
+                  ? `DM alert queued for ${notify.to}`
+                  : "Owner will be emailed if notifications are on."
+              );
+            }
+          } catch (notifyErr) {
+            console.warn("[PostSwap] sendDm: email notify failed", notifyErr);
+          }
+        }
       } catch (err) {
         console.error("[PostSwap] sendDm: Supabase INSERT failed", {
           message: err && err.message,
@@ -1516,15 +1538,6 @@
     }
 
     setButtonLoading(sendBtn, false);
-
-    if (user?.notifications?.emailEnabled && user.notifications.onDm) {
-      setTimeout(() => {
-        simulateEmailAlert(
-          "dm",
-          `Activity on ${currentDmSwap.current} → ${currentDmSwap.desired}`
-        );
-      }, 1200);
-    }
 
     // Light auto-reply for demo feel when no remote thread yet
     if (!canSaveRemote) {
@@ -1666,23 +1679,27 @@
         : "Your request is on the map. Login to manage it under My Swaps."
     );
 
-    if (user?.notifications?.emailEnabled && user.notifications.onStateSwap && user.state) {
-      const stateNames = {
-        NV: "Nevada",
-        AZ: "Arizona",
-        CA: "California",
-        TX: "Texas",
-        CO: "Colorado",
-        IL: "Illinois",
-        GA: "Georgia",
-      };
-      const loc = `${current} ${desired}`.toUpperCase();
-      const abbr = user.state;
-      const full = (stateNames[abbr] || "").toUpperCase();
-      if (loc.includes(abbr) || (full && loc.includes(full))) {
-        setTimeout(() => {
-          simulateEmailAlert("state", `New listing involves ${current} / ${desired}`);
-        }, 900);
+    // Email carriers whose home state matches this listing
+    if (
+      savedRemote &&
+      useSupabase &&
+      db() &&
+      typeof db().notifyMatchingSwap === "function"
+    ) {
+      try {
+        const matchNotify = await db().notifyMatchingSwap({
+          swap: newSwap,
+          excludeUserId: user ? user.id : null,
+        });
+        console.log("[PostSwap] handlePost: matching-swap emails", matchNotify);
+        if (matchNotify && matchNotify.queued > 0) {
+          showToast(
+            "Match emails queued",
+            `${matchNotify.queued} carrier${matchNotify.queued === 1 ? "" : "s"} notified about this area.`
+          );
+        }
+      } catch (notifyErr) {
+        console.warn("[PostSwap] handlePost: matching-swap notify failed", notifyErr);
       }
     }
 

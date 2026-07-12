@@ -1,6 +1,6 @@
 /* ============================================
    PostSwap — Supabase REST helpers (fetch API)
-   BUILD: 2026-07-11a (redeploy stamp)
+   BUILD: 2026-07-11c (email notifications)
    Matched to existing project tables:
      - public.swaps
      - public."messages (for DMs)"
@@ -10,7 +10,7 @@
 (function (global) {
   "use strict";
 
-  const BUILD = "2026-07-11a";
+  const BUILD = "2026-07-11c";
   const SUPABASE_URL = "https://olfystbcngdcevtndkdq.supabase.co";
   const SUPABASE_ANON_KEY =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9sZnlzdGJjbmdkY2V2dG5ka2RxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM2MzE5NTMsImV4cCI6MjA5OTIwNzk1M30.Kr47X97Wrpppt2Vs-XhOzYMsQD8PmAPwbuWEyG8xEAk";
@@ -479,6 +479,257 @@
     }
   }
 
+  async function fetchAllProfiles() {
+    console.log("[PostSwapDB] fetchAllProfiles()");
+    try {
+      const rows = await request("/profiles?select=*&order=updated_at.desc&limit=500");
+      const mapped = (rows || []).map(mapProfileFromDb).filter(Boolean);
+      console.log("[PostSwapDB] fetchAllProfiles count:", mapped.length);
+      return mapped;
+    } catch (err) {
+      console.error("[PostSwapDB] fetchAllProfiles FAILED", err);
+      if (err.status === 404) return [];
+      throw err;
+    }
+  }
+
+  // ---------- Email notifications (queue + optional Edge Function) ----------
+  function prefsOf(profile) {
+    const n = (profile && profile.notifications) || {};
+    return {
+      emailEnabled: n.emailEnabled !== false,
+      onInterest: n.onInterest !== false,
+      onStateSwap: n.onStateSwap !== false,
+      onDm: n.onDm !== false,
+    };
+  }
+
+  function wantsEmail(profile, kind) {
+    if (!profile || !profile.email) return false;
+    const p = prefsOf(profile);
+    if (!p.emailEnabled) return false;
+    if (kind === "new_dm") return p.onDm;
+    if (kind === "matching_swap") return p.onStateSwap;
+    if (kind === "interest") return p.onInterest;
+    return false;
+  }
+
+  async function queueEmail({ toEmail, toUserId, subject, body, eventType, meta }) {
+    const payload = {
+      to_email: toEmail,
+      to_user_id: toUserId || null,
+      subject,
+      body,
+      event_type: eventType || "general",
+      meta: meta || {},
+      status: "pending",
+    };
+    console.log("[PostSwapDB] queueEmail →", payload);
+    try {
+      const rows = await request("/email_queue", {
+        method: "POST",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify(payload),
+      });
+      const row = Array.isArray(rows) ? rows[0] : rows;
+      console.log("[PostSwapDB] queueEmail success", row);
+      return row;
+    } catch (err) {
+      console.error("[PostSwapDB] queueEmail FAILED", {
+        message: err && err.message,
+        status: err && err.status,
+        data: err && err.data,
+        tip: "Create public.email_queue via supabase-schema.sql",
+      });
+      throw err;
+    }
+  }
+
+  /** Best-effort: invoke Edge Function to flush pending queue (if deployed). */
+  async function dispatchEmailQueue() {
+    const url = `${SUPABASE_URL}/functions/v1/dispatch-emails`;
+    console.log("[PostSwapDB] dispatchEmailQueue →", url);
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ process: true }),
+      });
+      const text = await res.text();
+      let data = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = text;
+      }
+      console.log("[PostSwapDB] dispatchEmailQueue response", res.status, data);
+      return { ok: res.ok, status: res.status, data };
+    } catch (err) {
+      console.warn("[PostSwapDB] dispatchEmailQueue unavailable", err && err.message);
+      return { ok: false, skipped: true, message: err && err.message };
+    }
+  }
+
+  /**
+   * Notify swap owner of a new DM (if their profile opts in).
+   * @param {{ swap, messageBody, fromUser }} args
+   */
+  async function notifyNewDm({ swap, messageBody, fromUser }) {
+    console.log("[PostSwapDB] notifyNewDm", { swapId: swap && swap.id, fromUser });
+    if (!swap) return { queued: 0 };
+
+    let owner = null;
+    if (swap.ownerId) {
+      try {
+        owner = await fetchProfile(swap.ownerId);
+      } catch (err) {
+        console.warn("[PostSwapDB] notifyNewDm: owner lookup failed", err);
+      }
+    }
+
+    // Fallback: match by username label (demo accounts)
+    if (!owner && swap.username) {
+      try {
+        const all = await fetchAllProfiles();
+        owner = all.find(
+          (p) =>
+            p.name &&
+            swap.username &&
+            p.name.toLowerCase().includes(String(swap.username).split("•")[0].trim().toLowerCase())
+        ) || null;
+      } catch (_) { /* ignore */ }
+    }
+
+    if (!owner || !wantsEmail(owner, "new_dm")) {
+      console.log("[PostSwapDB] notifyNewDm: no recipient or prefs off", owner);
+      return { queued: 0, reason: "no_recipient_or_prefs" };
+    }
+
+    // Don't email yourself
+    if (fromUser && String(owner.id) === String(fromUser.id || fromUser)) {
+      console.log("[PostSwapDB] notifyNewDm: skip self");
+      return { queued: 0, reason: "self" };
+    }
+
+    const route = `${swap.current || "?"} → ${swap.desired || "?"}`;
+    const fromName = (fromUser && fromUser.name) || "A verified carrier";
+    const subject = `New PostSwap DM on ${route}`;
+    const body = [
+      `Hi ${owner.name || "Carrier"},`,
+      "",
+      `${fromName} sent you a message about your swap:`,
+      route,
+      "",
+      `Message:`,
+      `"${messageBody || ""}"`,
+      "",
+      `Open PostSwap → Mailbox → My Messages to reply.`,
+      "",
+      `— PostSwap (built by carriers, for carriers)`,
+      `You're receiving this because email notifications are enabled in your profile.`,
+    ].join("\n");
+
+    const row = await queueEmail({
+      toEmail: owner.email,
+      toUserId: owner.id,
+      subject,
+      body,
+      eventType: "new_dm",
+      meta: {
+        swap_id: swap.id,
+        from_user_id: fromUser && (fromUser.id || fromUser),
+      },
+    });
+
+    const dispatch = await dispatchEmailQueue();
+    return { queued: 1, row, dispatch, to: owner.email };
+  }
+
+  /**
+   * Notify carriers who want emails about matching / nearby swaps.
+   * Matches home state against current or desired location text.
+   */
+  async function notifyMatchingSwap({ swap, excludeUserId }) {
+    console.log("[PostSwapDB] notifyMatchingSwap", { swapId: swap && swap.id });
+    if (!swap) return { queued: 0 };
+
+    let profiles = [];
+    try {
+      profiles = await fetchAllProfiles();
+    } catch (err) {
+      console.error("[PostSwapDB] notifyMatchingSwap: profiles failed", err);
+      return { queued: 0, error: err.message };
+    }
+
+    const hay = `${swap.current || ""} ${swap.desired || ""}`.toUpperCase();
+    const STATE_NAMES = {
+      AL: "ALABAMA", AK: "ALASKA", AZ: "ARIZONA", AR: "ARKANSAS", CA: "CALIFORNIA",
+      CO: "COLORADO", CT: "CONNECTICUT", DE: "DELAWARE", FL: "FLORIDA", GA: "GEORGIA",
+      HI: "HAWAII", ID: "IDAHO", IL: "ILLINOIS", IN: "INDIANA", IA: "IOWA",
+      KS: "KANSAS", KY: "KENTUCKY", LA: "LOUISIANA", ME: "MAINE", MD: "MARYLAND",
+      MA: "MASSACHUSETTS", MI: "MICHIGAN", MN: "MINNESOTA", MS: "MISSISSIPPI",
+      MO: "MISSOURI", MT: "MONTANA", NE: "NEBRASKA", NV: "NEVADA", NH: "NEW HAMPSHIRE",
+      NJ: "NEW JERSEY", NM: "NEW MEXICO", NY: "NEW YORK", NC: "NORTH CAROLINA",
+      ND: "NORTH DAKOTA", OH: "OHIO", OK: "OKLAHOMA", OR: "OREGON", PA: "PENNSYLVANIA",
+      RI: "RHODE ISLAND", SC: "SOUTH CAROLINA", SD: "SOUTH DAKOTA", TN: "TENNESSEE",
+      TX: "TEXAS", UT: "UTAH", VT: "VERMONT", VA: "VIRGINIA", WA: "WASHINGTON",
+      WV: "WEST VIRGINIA", WI: "WISCONSIN", WY: "WYOMING", DC: "DISTRICT OF COLUMBIA",
+    };
+
+    const recipients = profiles.filter((p) => {
+      if (!wantsEmail(p, "matching_swap")) return false;
+      if (excludeUserId && String(p.id) === String(excludeUserId)) return false;
+      if (!p.state) return false;
+      const abbr = String(p.state).toUpperCase();
+      const full = STATE_NAMES[abbr] || "";
+      return hay.includes(abbr) || (full && hay.includes(full));
+    });
+
+    console.log("[PostSwapDB] notifyMatchingSwap recipients:", recipients.length);
+
+    const queued = [];
+    const route = `${swap.current || "?"} → ${swap.desired || "?"}`;
+    for (const p of recipients) {
+      const subject = `New PostSwap listing may match you (${p.state})`;
+      const body = [
+        `Hi ${p.name || "Carrier"},`,
+        "",
+        `A new mutual swap was posted that involves your state (${p.state}):`,
+        route,
+        `Craft: ${swap.craft || "—"} · Seniority: ${swap.seniority != null ? swap.seniority : "—"} yrs`,
+        swap.notes ? `Note: ${swap.notes}` : "",
+        "",
+        `Browse Open Swaps on PostSwap to learn more or send a DM.`,
+        "",
+        `— PostSwap`,
+        `Turn off “New swap in my state” anytime in Profile → Email notifications.`,
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      try {
+        const row = await queueEmail({
+          toEmail: p.email,
+          toUserId: p.id,
+          subject,
+          body,
+          eventType: "matching_swap",
+          meta: { swap_id: swap.id, state: p.state },
+        });
+        queued.push({ email: p.email, id: row && row.id });
+      } catch (err) {
+        console.warn("[PostSwapDB] notifyMatchingSwap queue failed for", p.email, err);
+      }
+    }
+
+    const dispatch = queued.length ? await dispatchEmailQueue() : { skipped: true };
+    return { queued: queued.length, recipients: queued, dispatch };
+  }
+
   /**
    * Fully self-contained INSERT probe for swaps + messages.
    * Uses direct fetch (does not depend on other helpers failing).
@@ -680,7 +931,12 @@
     sendMessage: sendMessage,
     fetchProfile: fetchProfile,
     fetchProfileByEmail: fetchProfileByEmail,
+    fetchAllProfiles: fetchAllProfiles,
     saveProfile: saveProfile,
+    queueEmail: queueEmail,
+    dispatchEmailQueue: dispatchEmailQueue,
+    notifyNewDm: notifyNewDm,
+    notifyMatchingSwap: notifyMatchingSwap,
     mapSwapFromDb: mapSwapFromDb,
     geocode: geocode,
     testAnonInserts: testAnonInserts,

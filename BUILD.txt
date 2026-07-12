@@ -1,7 +1,15 @@
 PostSwap build stamp
 ====================
-BUILD: 2026-07-11a
+BUILD: 2026-07-11c
 DATE:  2026-07-11
+
+Email notifications
+-------------------
+1. Run supabase-schema.sql (creates profiles + email_queue).
+2. Optional: deploy Edge Function supabase/functions/dispatch-emails
+   and set RESEND_API_KEY for real delivery.
+3. Profile → save email + toggles (DM / state swaps / interest).
+4. New DMs and matching swaps enqueue rows in email_queue.
 
 Redeploy checklist
 ------------------

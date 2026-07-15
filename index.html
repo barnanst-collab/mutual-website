@@ -12,8 +12,8 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
-  <link rel="stylesheet" href="styles.css?v=20260714a" />
-  <meta name="postswap-build" content="2026-07-14a" />
+  <link rel="stylesheet" href="styles.css?v=20260715a" />
+  <meta name="postswap-build" content="2026-07-15a" />
 </head>
 <body>
   <!-- Toast Container -->
@@ -48,6 +48,7 @@
         <a href="#explore" class="nav-link">Explore the Map</a>
         <a href="#explore" class="nav-link" data-action="open-post">Post a Swap</a>
         <button type="button" class="nav-link nav-link-btn" data-action="open-share-site">Share</button>
+        <button type="button" class="nav-link nav-link-btn" data-action="open-feedback">Feedback</button>
       </nav>
 
       <div class="nav-actions" id="nav-actions">
@@ -141,6 +142,7 @@
       <a href="#explore" class="mobile-link">Explore the Map</a>
       <a href="#explore" class="mobile-link" data-action="open-post">Post a Swap</a>
       <button type="button" class="mobile-link mobile-link-btn" data-action="open-share-site">Share with a carrier buddy</button>
+      <button type="button" class="mobile-link mobile-link-btn" data-action="open-feedback">Give Feedback</button>
       <div class="mobile-auth" id="mobile-auth">
         <button type="button" class="btn btn-ghost btn-block" data-action="open-login">Login</button>
         <button type="button" class="btn btn-primary btn-block" data-action="open-register">Register</button>
@@ -442,6 +444,9 @@
         <a href="#regulations">Regulations</a>
         <a href="#explore">Explore</a>
         <button type="button" class="link-btn" data-action="open-post">Post a Swap</button>
+        <button type="button" class="link-btn feedback-footer-btn" data-action="open-feedback">
+          ✉ Give Feedback
+        </button>
       </div>
 
       <!-- Buy Me a Coffee — PostalBigfoot -->
@@ -701,6 +706,72 @@
     </div>
   </div>
 
+  <!-- Give Feedback Modal -->
+  <div class="modal modal-feedback" id="modal-feedback" role="dialog" aria-labelledby="feedback-title" aria-modal="true" hidden>
+    <div class="modal-header">
+      <div>
+        <h2 id="feedback-title">Give Feedback</h2>
+        <p class="modal-sub">Help us deliver a better PostSwap — carrier to carrier.</p>
+      </div>
+      <button type="button" class="modal-close" data-action="close-modal" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body feedback-body">
+      <p class="feedback-intro">How’s the experience so far? Rate us on the <strong>postal scale</strong>:</p>
+
+      <div class="postal-rating" id="postal-rating" role="radiogroup" aria-label="Postal-themed rating">
+        <label class="postal-rate-card">
+          <input type="radio" name="postal-rating" value="1" data-label="Dead Letter" />
+          <span class="postal-rate-face" aria-hidden="true">📭</span>
+          <span class="postal-rate-num">1</span>
+          <span class="postal-rate-name">Dead Letter</span>
+          <span class="postal-rate-desc">Lost in the system</span>
+        </label>
+        <label class="postal-rate-card">
+          <input type="radio" name="postal-rating" value="2" data-label="Returned to Sender" />
+          <span class="postal-rate-face" aria-hidden="true">↩️</span>
+          <span class="postal-rate-num">2</span>
+          <span class="postal-rate-name">Returned to Sender</span>
+          <span class="postal-rate-desc">Needs a re-route</span>
+        </label>
+        <label class="postal-rate-card">
+          <input type="radio" name="postal-rating" value="3" data-label="Standard Delivery" checked />
+          <span class="postal-rate-face" aria-hidden="true">📬</span>
+          <span class="postal-rate-num">3</span>
+          <span class="postal-rate-name">Standard Delivery</span>
+          <span class="postal-rate-desc">Gets the job done</span>
+        </label>
+        <label class="postal-rate-card">
+          <input type="radio" name="postal-rating" value="4" data-label="Priority Mail" />
+          <span class="postal-rate-face" aria-hidden="true">📮</span>
+          <span class="postal-rate-num">4</span>
+          <span class="postal-rate-name">Priority Mail</span>
+          <span class="postal-rate-desc">Fast &amp; reliable</span>
+        </label>
+        <label class="postal-rate-card">
+          <input type="radio" name="postal-rating" value="5" data-label="Express Overnight" />
+          <span class="postal-rate-face" aria-hidden="true">🚀</span>
+          <span class="postal-rate-num">5</span>
+          <span class="postal-rate-name">Express Overnight</span>
+          <span class="postal-rate-desc">Carrier excellence</span>
+        </label>
+      </div>
+
+      <div class="form-row">
+        <label for="feedback-note">Anything else? <span class="label-hint">(optional)</span></label>
+        <textarea id="feedback-note" rows="3" placeholder="What should we fix, add, or keep? Routes, map, DMs, mobile…"></textarea>
+      </div>
+
+      <p class="feedback-selected" id="feedback-selected" aria-live="polite">Selected: <strong>Standard Delivery</strong> (3/5)</p>
+
+      <button type="button" class="btn btn-primary btn-lg btn-block" id="feedback-open-form">
+        Continue to Google Form
+      </button>
+      <p class="field-hint feedback-form-hint">
+        Opens the PostSwap feedback form with your postal rating ready to submit.
+      </p>
+    </div>
+  </div>
+
   <!-- Share Modal (site or individual swap) -->
   <div class="modal modal-share" id="modal-share" role="dialog" aria-labelledby="share-title" aria-modal="true" hidden>
     <div class="modal-header">
@@ -919,9 +990,9 @@
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <!-- cache-bust so hard refresh always gets latest scripts -->
-  <script src="geocode.js?v=20260714a"></script>
-  <script src="supabase.js?v=20260714a"></script>
-  <script src="app.js?v=20260714a"></script>
+  <script src="geocode.js?v=20260715a"></script>
+  <script src="supabase.js?v=20260715a"></script>
+  <script src="app.js?v=20260715a"></script>
   <script>
     // Available immediately after page scripts load
     (function () {

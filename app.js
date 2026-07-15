@@ -150,7 +150,11 @@
     modalMySwaps: $("#modal-my-swaps"),
     modalInbox: $("#modal-inbox"),
     modalShare: $("#modal-share"),
+    modalFeedback: $("#modal-feedback"),
     modalProfile: $("#modal-profile"),
+    feedbackNote: $("#feedback-note"),
+    feedbackSelected: $("#feedback-selected"),
+    feedbackOpenForm: $("#feedback-open-form"),
     inboxThreads: $("#inbox-threads"),
     inboxStatus: $("#inbox-status"),
     inboxEmptyThread: $("#inbox-empty-thread"),
@@ -970,8 +974,121 @@
     els.modalMySwaps,
     els.modalInbox,
     els.modalShare,
+    els.modalFeedback,
     els.modalProfile,
   ];
+
+  // ---------- Give Feedback (Google Form + postal rating) ----------
+  // Replace baseUrl with your live form link (Share → Copy link / Get pre-filled link).
+  // Prefill entry IDs: open the form → ⋮ → Get pre-filled link → fill sample answers → copy URL.
+  const FEEDBACK_GOOGLE_FORM = {
+    // Short or full viewform URL — update when you publish the official PostSwap form
+    baseUrl:
+      "https://docs.google.com/forms/d/e/1FAIpQLSfPostSwapCarrierFeedback/viewform",
+    // Optional: entry.XXXXXXXX from a pre-filled link
+    entryRating: "", // e.g. "entry.123456789"
+    entryRatingLabel: "", // optional second field for "Express Overnight" text
+    entryNotes: "", // e.g. "entry.987654321"
+  };
+
+  function getSelectedPostalRating() {
+    const input = document.querySelector('input[name="postal-rating"]:checked');
+    if (!input) {
+      return { value: "3", label: "Standard Delivery" };
+    }
+    return {
+      value: input.value,
+      label: input.getAttribute("data-label") || input.value,
+    };
+  }
+
+  function updateFeedbackSelectedLabel() {
+    if (!els.feedbackSelected) return;
+    const r = getSelectedPostalRating();
+    els.feedbackSelected.innerHTML =
+      "Selected: <strong>" +
+      escapeHtml(r.label) +
+      "</strong> (" +
+      escapeHtml(r.value) +
+      "/5)";
+  }
+
+  function buildFeedbackFormUrl() {
+    const r = getSelectedPostalRating();
+    const note = (els.feedbackNote && els.feedbackNote.value.trim()) || "";
+    const ratingLine = r.value + " — " + r.label;
+    let url = FEEDBACK_GOOGLE_FORM.baseUrl;
+
+    // Prefer prefill params when entry IDs are configured
+    const params = new URLSearchParams();
+    params.set("usp", "pp_url");
+    if (FEEDBACK_GOOGLE_FORM.entryRating) {
+      params.set(FEEDBACK_GOOGLE_FORM.entryRating, ratingLine);
+    }
+    if (FEEDBACK_GOOGLE_FORM.entryRatingLabel) {
+      params.set(FEEDBACK_GOOGLE_FORM.entryRatingLabel, r.label);
+    }
+    if (FEEDBACK_GOOGLE_FORM.entryNotes && note) {
+      params.set(FEEDBACK_GOOGLE_FORM.entryNotes, note);
+    }
+
+    // If no entry IDs, still open the form; append hint in fragment for the user
+    const hasEntries =
+      FEEDBACK_GOOGLE_FORM.entryRating || FEEDBACK_GOOGLE_FORM.entryNotes;
+    if (hasEntries) {
+      const joiner = url.indexOf("?") >= 0 ? "&" : "?";
+      url = url + joiner + params.toString();
+    }
+
+    return { url: url, rating: r, note: note, ratingLine: ratingLine };
+  }
+
+  function openFeedback() {
+    closeMobileMenu();
+    if (els.feedbackNote) els.feedbackNote.value = "";
+    const defaultRadio = document.querySelector(
+      'input[name="postal-rating"][value="3"]'
+    );
+    if (defaultRadio) defaultRadio.checked = true;
+    updateFeedbackSelectedLabel();
+    openModal(els.modalFeedback);
+  }
+
+  function submitFeedbackToGoogleForm() {
+    const built = buildFeedbackFormUrl();
+    console.log("[PostSwap] Opening feedback form", built);
+
+    // Copy rating summary so user can paste if prefill isn't configured
+    const clipboardText =
+      "PostSwap feedback\nPostal rating: " +
+      built.ratingLine +
+      (built.note ? "\n\nNotes:\n" + built.note : "");
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(clipboardText).catch(function () {});
+    }
+
+    const isPlaceholder =
+      !FEEDBACK_GOOGLE_FORM.baseUrl ||
+      FEEDBACK_GOOGLE_FORM.baseUrl.indexOf("1FAIpQLSfPostSwapCarrierFeedback") !==
+        -1;
+
+    if (isPlaceholder) {
+      showToast(
+        "Rating copied!",
+        "Set FEEDBACK_GOOGLE_FORM.baseUrl in app.js to your live Google Form link. Rating: " +
+          built.ratingLine
+      );
+      console.warn(
+        "[PostSwap] FEEDBACK_GOOGLE_FORM.baseUrl is still a placeholder. Paste your real form URL in app.js."
+      );
+      // Still try open in case they already replaced it partially
+    } else {
+      showToast("Opening form", "Your postal rating was copied — paste if needed.");
+    }
+
+    window.open(built.url, "_blank", "noopener,noreferrer");
+  }
 
   // ---------- My Messages inbox ----------
   let inboxThreads = []; // { swapId, swap, messages, lastAt, preview }
@@ -1725,6 +1842,11 @@
         closeMobileMenu();
         openShareSite();
         break;
+      case "open-feedback":
+        e.preventDefault();
+        closeMobileMenu();
+        openFeedback();
+        break;
       default:
         break;
     }
@@ -1850,6 +1972,14 @@
         setActiveSwap(card.dataset.id);
       }
     });
+
+    // Feedback modal
+    document.querySelectorAll('input[name="postal-rating"]').forEach(function (radio) {
+      radio.addEventListener("change", updateFeedbackSelectedLabel);
+    });
+    if (els.feedbackOpenForm) {
+      els.feedbackOpenForm.addEventListener("click", submitFeedbackToGoogleForm);
+    }
 
     // Share modal actions (site or individual swap)
     if (els.shareCopyMsg) {

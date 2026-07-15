@@ -1116,15 +1116,35 @@
 
   async function loadInboxThreads() {
     if (!els.inboxThreads) return;
-    els.inboxStatus.textContent = "Loading messages…";
+
+    if (!user) {
+      els.inboxThreads.innerHTML = `
+        <div class="mailbox-empty">
+          <p><strong>Sign in required</strong><br />Log in to see only your DMs.</p>
+        </div>
+      `;
+      els.inboxStatus.textContent = "Not signed in";
+      inboxThreads = [];
+      activeInboxSwapId = null;
+      showInboxThreadEmpty();
+      return;
+    }
+
+    els.inboxStatus.textContent = "Loading your messages…";
     els.inboxThreads.innerHTML = `
       <div class="inbox-loading">
         <span class="loading-spinner loading-spinner-sm" aria-hidden="true"></span>
-        Fetching DMs…
+        Fetching your DMs…
       </div>
     `;
 
-    if (!useSupabase || !db() || typeof db().fetchAllMessages !== "function") {
+    const canFetchUser =
+      useSupabase &&
+      db() &&
+      (typeof db().fetchMessagesForUser === "function" ||
+        typeof db().fetchAllMessages === "function");
+
+    if (!canFetchUser) {
       els.inboxThreads.innerHTML = `
         <div class="mailbox-empty">
           <p><strong>Inbox unavailable</strong><br />Supabase messages helper not loaded.</p>
@@ -1135,57 +1155,83 @@
     }
 
     try {
-      const allMsgs = await db().fetchAllMessages(250);
-      const myId = user ? String(user.id) : "";
+      // Server-side filter: only rows where from_user / to_user is this user
+      let myMsgs = [];
+      if (typeof db().fetchMessagesForUser === "function") {
+        myMsgs = await db().fetchMessagesForUser(user, 300);
+      } else {
+        // Legacy path — still filter hard on the client
+        const all = await db().fetchAllMessages(300);
+        const keys = (db().userIdentityKeys
+          ? db().userIdentityKeys(user)
+          : [user.id, user.email, user.name]
+        ).map(function (k) {
+          return String(k || "").toLowerCase();
+        });
+        myMsgs = (all || []).filter(function (m) {
+          const from = String(m.senderId || "").toLowerCase();
+          const to = String(m.toUser || "").toLowerCase();
+          return keys.indexOf(from) !== -1 || keys.indexOf(to) !== -1;
+        });
+      }
 
-      // Keep messages related to this user (sent, received, or on their swaps)
-      const mySwapIds = new Set(
-        swaps.filter((s) => idEq(s.ownerId, myId)).map((s) => String(s.id))
-      );
-      const relevant = allMsgs.filter((m) => {
-        const sid = String(m.swapId);
-        return (
-          idEq(m.senderId, myId) ||
-          idEq(m.toUser, myId) ||
-          mySwapIds.has(sid) ||
-          // Demo: include threads on known map swaps so inbox isn't empty for new accounts
-          swaps.some((s) => idEq(s.id, m.swapId))
-        );
+      // Extra client guard: never show a message the user is not party to
+      const identity = (db().userIdentityKeys
+        ? db().userIdentityKeys(user)
+        : [user.id]
+      ).map(function (k) {
+        return String(k || "").toLowerCase();
+      });
+      const relevant = (myMsgs || []).filter(function (m) {
+        const from = String(m.senderId || "").toLowerCase();
+        const to = String(m.toUser || "").toLowerCase();
+        return identity.indexOf(from) !== -1 || identity.indexOf(to) !== -1;
       });
 
-      // Group by swapId (messages already desc — reverse per thread for chronological)
+      console.log("[PostSwap] inbox: user-only messages", {
+        userId: user.id,
+        count: relevant.length,
+      });
+
+      // Group by swapId
       const bySwap = new Map();
-      relevant.forEach((m) => {
+      relevant.forEach(function (m) {
         const key = String(m.swapId);
         if (!bySwap.has(key)) bySwap.set(key, []);
         bySwap.get(key).push(m);
       });
 
       inboxThreads = Array.from(bySwap.entries())
-        .map(([swapId, messages]) => {
-          const chronological = [...messages].sort((a, b) => {
+        .map(function (entry) {
+          const swapId = entry[0];
+          const messages = entry[1];
+          const chronological = messages.slice().sort(function (a, b) {
             return new Date(a.createdAt || 0) - new Date(b.createdAt || 0);
           });
           const last = chronological[chronological.length - 1];
           const swap = findSwapById(swapId) || null;
           return {
-            swapId,
-            swap,
+            swapId: swapId,
+            swap: swap,
             messages: chronological,
             lastAt: last && last.createdAt,
             preview: (last && last.body) || "",
             count: chronological.length,
           };
         })
-        .sort((a, b) => new Date(b.lastAt || 0) - new Date(a.lastAt || 0));
+        .sort(function (a, b) {
+          return new Date(b.lastAt || 0) - new Date(a.lastAt || 0);
+        });
 
       renderInboxThreadList();
       els.inboxStatus.textContent =
         inboxThreads.length === 0
           ? "No messages yet"
-          : `${inboxThreads.length} conversation${inboxThreads.length === 1 ? "" : "s"}`;
+          : inboxThreads.length +
+            " conversation" +
+            (inboxThreads.length === 1 ? "" : "s") +
+            " (only yours)";
 
-      // Keep selected thread if still present
       if (activeInboxSwapId && bySwap.has(String(activeInboxSwapId))) {
         selectInboxThread(activeInboxSwapId);
       } else {
@@ -1522,10 +1568,29 @@
 
     if (canLoadRemote) {
       try {
-        history = await db().fetchMessages(swap.id);
+        // Only load messages this user is party to (from_user / to_user)
+        history = await db().fetchMessages(swap.id, user || null);
       } catch (err) {
         console.warn("Could not load messages:", err);
       }
+    }
+
+    // Client guard: drop any row that isn't clearly from/to this user
+    if (history.length && user) {
+      const keys = (
+        db() && typeof db().userIdentityKeys === "function"
+          ? db().userIdentityKeys(user)
+          : [user.id, user.email, user.name]
+      ).map(function (k) {
+        return String(k || "").toLowerCase();
+      });
+      history = history.filter(function (m) {
+        const from = String(m.senderId || "").toLowerCase();
+        const to = String(m.toUser || "").toLowerCase();
+        return keys.indexOf(from) !== -1 || keys.indexOf(to) !== -1;
+      });
+    } else if (!user) {
+      history = [];
     }
 
     if (history.length) {
@@ -1579,10 +1644,14 @@
           swapId: currentDmSwap.id,
           senderId: user ? user.id : "guest",
         });
+        // Always stamp from_user with stable user id; to_user = listing owner id/username
         const savedMsg = await db().sendMessage({
           swapId: currentDmSwap.id,
           senderId: user ? user.id : "guest",
-          toUser: currentDmSwap.ownerId || currentDmSwap.username || null,
+          toUser:
+            currentDmSwap.ownerId ||
+            currentDmSwap.username ||
+            null,
           body: text,
         });
         console.log("[PostSwap] sendDm: saved", savedMsg);

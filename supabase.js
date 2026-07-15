@@ -291,14 +291,132 @@
     };
   }
 
-  async function fetchMessages(swapId) {
-    console.log("[PostSwapDB] fetchMessages() swapId=", swapId);
+  /** Build PostgREST eq filter value (quote if needed). */
+  function pgEq(col, val) {
+    const v = String(val);
+    // Quote values with reserved/special characters
+    if (/[\s,():."']/.test(v) || v.indexOf("•") !== -1) {
+      return col + '.eq."' + v.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+    }
+    return col + ".eq." + encodeURIComponent(v);
+  }
+
+  /**
+   * Identity keys for the logged-in user (id, username-style labels, email, name).
+   * Used so older rows stored under username still match.
+   */
+  function userIdentityKeys(user) {
+    if (!user) return [];
+    const keys = [];
+    const push = (v) => {
+      if (v == null || v === "") return;
+      const s = String(v).trim();
+      if (s && keys.indexOf(s) === -1) keys.push(s);
+    };
+    push(user.id);
+    push(user.user_id);
+    push(user.email);
+    push(user.name);
+    push(user.username);
+    push(user.initials);
+    if (user.name) {
+      const first = String(user.name).split(/\s+/)[0];
+      push(first);
+      // Matches swap username format used when posting
+      push(first + " • " + (user.state || "US"));
+      push(first + " • " + (user.state || ""));
+    }
+    return keys;
+  }
+
+  /** Nested or(...) for PostgREST and=(); top-level uses or=() */
+  function userParticipationOrInner(userKeys) {
+    const parts = [];
+    (userKeys || []).forEach(function (k) {
+      parts.push(pgEq("from_user", k));
+      parts.push(pgEq("to_user", k));
+    });
+    if (!parts.length) return null;
+    return "or(" + parts.join(",") + ")";
+  }
+
+  function userParticipationOrQuery(userKeys) {
+    const parts = [];
+    (userKeys || []).forEach(function (k) {
+      parts.push(pgEq("from_user", k));
+      parts.push(pgEq("to_user", k));
+    });
+    if (!parts.length) return null;
+    return "or=(" + parts.join(",") + ")";
+  }
+
+  function messageInvolvesUser(m, keySet) {
+    const from = String(m.senderId || "").toLowerCase();
+    const to = String(m.toUser || "").toLowerCase();
+    return !!(keySet[from] || keySet[to]);
+  }
+
+  function keySetFromList(keys) {
+    const keySet = {};
+    (keys || []).forEach(function (k) {
+      keySet[String(k || "").toLowerCase()] = true;
+    });
+    return keySet;
+  }
+
+  /**
+   * Messages on a single swap visible only to the current user
+   * (from_user / to_user matches their id or username).
+   */
+  async function fetchMessages(swapId, userOrKeys) {
+    console.log("[PostSwapDB] fetchMessages() swapId=", swapId, "userFilter=", !!userOrKeys);
     try {
-      const rows = await request(
-        `/${MESSAGES_TABLE}?swap_id=eq.${encodeURIComponent(String(swapId))}&select=*&order=created_at.asc`
-      );
-      const mapped = (rows || []).map(mapMessageRow);
-      console.log("[PostSwapDB] fetchMessages result count:", mapped.length, mapped);
+      const keys = Array.isArray(userOrKeys)
+        ? userOrKeys
+        : userIdentityKeys(userOrKeys);
+      const orInner = userParticipationOrInner(keys);
+      if (!orInner) {
+        console.warn(
+          "[PostSwapDB] fetchMessages: no user keys — refusing unfiltered swap thread"
+        );
+        return [];
+      }
+
+      // and=(swap_id.eq.X,or(from_user.eq.me,to_user.eq.me,...))
+      const path =
+        "/" +
+        MESSAGES_TABLE +
+        "?and=(swap_id.eq." +
+        encodeURIComponent(String(swapId)) +
+        "," +
+        orInner +
+        ")&select=*&order=created_at.asc";
+
+      let rows;
+      try {
+        rows = await request(path);
+      } catch (filterErr) {
+        // Fallback: filter by swap then client-side (if nested and/or fails on project)
+        console.warn(
+          "[PostSwapDB] fetchMessages nested filter failed, client filter fallback",
+          filterErr && filterErr.message
+        );
+        rows = await request(
+          "/" +
+            MESSAGES_TABLE +
+            "?swap_id=eq." +
+            encodeURIComponent(String(swapId)) +
+            "&select=*&order=created_at.asc"
+        );
+      }
+
+      const keySet = keySetFromList(keys);
+      const mapped = (rows || [])
+        .map(mapMessageRow)
+        .filter(function (m) {
+          return messageInvolvesUser(m, keySet);
+        });
+      console.log("[PostSwapDB] fetchMessages result count:", mapped.length);
       return mapped;
     } catch (err) {
       console.error("[PostSwapDB] fetchMessages FAILED", {
@@ -312,19 +430,63 @@
     }
   }
 
-  /** Fetch recent DMs across all swaps (for inbox). */
-  async function fetchAllMessages(limit) {
+  /**
+   * Inbox: only DMs where current user is from_user or to_user
+   * (matched by user id and/or username variants).
+   */
+  async function fetchMessagesForUser(user, limit) {
     const lim = Math.min(Math.max(Number(limit) || 200, 1), 500);
-    console.log("[PostSwapDB] fetchAllMessages() limit=", lim);
+    const keys = userIdentityKeys(user);
+    console.log("[PostSwapDB] fetchMessagesForUser()", { keys: keys, limit: lim });
+
+    if (!keys.length) {
+      console.warn("[PostSwapDB] fetchMessagesForUser: empty identity — returning []");
+      return [];
+    }
+
+    const keySet = keySetFromList(keys);
+
     try {
-      const rows = await request(
-        `/${MESSAGES_TABLE}?select=*&order=created_at.desc&limit=${lim}`
-      );
+      const orQuery = userParticipationOrQuery(keys);
+      const path =
+        "/" +
+        MESSAGES_TABLE +
+        "?" +
+        orQuery +
+        "&select=*&order=created_at.desc&limit=" +
+        lim;
+
+      let rows;
+      try {
+        rows = await request(path);
+      } catch (filterErr) {
+        // Fallback path: fetch recent and filter client-side only for this user
+        console.warn(
+          "[PostSwapDB] fetchMessagesForUser or= filter failed, using client filter",
+          filterErr && filterErr.message
+        );
+        rows = await request(
+          "/" +
+            MESSAGES_TABLE +
+            "?select=*&order=created_at.desc&limit=" +
+            lim
+        );
+      }
+
       const mapped = (rows || []).map(mapMessageRow);
-      console.log("[PostSwapDB] fetchAllMessages result count:", mapped.length);
-      return mapped;
+      const filtered = mapped.filter(function (m) {
+        return messageInvolvesUser(m, keySet);
+      });
+
+      console.log(
+        "[PostSwapDB] fetchMessagesForUser result:",
+        filtered.length,
+        "(raw",
+        mapped.length + ")"
+      );
+      return filtered;
     } catch (err) {
-      console.error("[PostSwapDB] fetchAllMessages FAILED", {
+      console.error("[PostSwapDB] fetchMessagesForUser FAILED", {
         message: err && err.message,
         status: err && err.status,
         data: err && err.data,
@@ -332,6 +494,14 @@
       });
       throw err;
     }
+  }
+
+  /** @deprecated Prefer fetchMessagesForUser — unfiltered dump is privacy-unsafe */
+  async function fetchAllMessages(limit) {
+    console.warn(
+      "[PostSwapDB] fetchAllMessages is deprecated for inbox; use fetchMessagesForUser"
+    );
+    return fetchMessagesForUser(null, limit);
   }
 
   async function sendMessage({ swapId, senderId, toUser, body }) {
@@ -910,7 +1080,9 @@
     fetchSwaps: fetchSwaps,
     createSwap: createSwap,
     fetchMessages: fetchMessages,
+    fetchMessagesForUser: fetchMessagesForUser,
     fetchAllMessages: fetchAllMessages,
+    userIdentityKeys: userIdentityKeys,
     sendMessage: sendMessage,
     fetchProfile: fetchProfile,
     fetchProfileByEmail: fetchProfileByEmail,

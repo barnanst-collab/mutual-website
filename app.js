@@ -24,24 +24,6 @@
 (function () {
   "use strict";
 
-  // City geocode hints for map pins when posting (not seed swap data)
-  const CITY_COORDS = {
-    "north las vegas": { lat: 36.1989, lng: -115.1175 },
-    "las vegas": { lat: 36.1699, lng: -115.1398 },
-    henderson: { lat: 36.0395, lng: -114.9817 },
-    phoenix: { lat: 33.4484, lng: -112.074 },
-    mesa: { lat: 33.4152, lng: -111.8315 },
-    tucson: { lat: 32.2226, lng: -110.9747 },
-    "san diego": { lat: 32.7157, lng: -117.1611 },
-    denver: { lat: 39.7392, lng: -104.9903 },
-    dallas: { lat: 32.7767, lng: -96.797 },
-    chicago: { lat: 41.8781, lng: -87.6298 },
-    atlanta: { lat: 33.749, lng: -84.388 },
-    "los angeles": { lat: 34.0522, lng: -118.2437 },
-    "albuquerque": { lat: 35.0844, lng: -106.6504 },
-    "salt lake": { lat: 40.7608, lng: -111.891 },
-  };
-
   // ---------- State ----------
   let swaps = [];
   let map = null;
@@ -84,12 +66,23 @@
         console.warn("[PostSwap] Supabase helper missing — starting with empty swaps");
         swapsLoaded = true;
         refreshViews();
+        forceMapRefresh([]);
         return { ok: false, source: "none", count: 0 };
       }
       const remote = await db().fetchSwaps();
       swaps = Array.isArray(remote) ? remote : [];
+      // Re-geocode on client so pins use latest city/state logic even if DB has no lat/lng
+      swaps = swaps.map(function (s) {
+        var coords = geocodeCurrent(s.current, s.id);
+        return Object.assign({}, s, {
+          lat: coords.lat,
+          lng: coords.lng,
+          region: s.region || regionFromLocation(s.current),
+        });
+      });
       swapsLoaded = true;
       refreshViews();
+      forceMapRefresh(getFilteredSwaps());
       console.log("[PostSwap] loaded swaps from Supabase:", swaps.length);
       return { ok: true, source: "supabase", count: swaps.length };
     } catch (err) {
@@ -97,6 +90,7 @@
       swaps = [];
       swapsLoaded = true;
       refreshViews();
+      forceMapRefresh([]);
       showToast(
         "Couldn’t load swaps",
         "Check Supabase connection. The list is empty until data loads or you post a swap."
@@ -104,6 +98,10 @@
       return { ok: false, error: err, count: 0 };
     } finally {
       setExploreLoading(false);
+      // One more refresh after loading spinner hides (layout size changes)
+      setTimeout(function () {
+        forceMapRefresh(getFilteredSwaps());
+      }, 100);
     }
   }
 
@@ -215,32 +213,64 @@
       .toUpperCase();
   }
 
-  function geocodeCurrent(cityStr) {
-    const lower = cityStr.toLowerCase();
-    for (const [key, coords] of Object.entries(CITY_COORDS)) {
-      if (lower.includes(key)) {
-        return {
-          lat: coords.lat + (Math.random() - 0.5) * 0.08,
-          lng: coords.lng + (Math.random() - 0.5) * 0.08,
-        };
-      }
+  function geocodeCurrent(cityStr, seed) {
+    if (window.PostSwapGeocode && typeof window.PostSwapGeocode.geocode === "function") {
+      return window.PostSwapGeocode.geocode(cityStr, seed || cityStr);
     }
-    // Default: scatter near Southwest
+    // Minimal fallback if geocode.js missing — spread across CONUS, not AZ-only
+    var h = 0;
+    var s = String(cityStr || "us");
+    for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
     return {
-      lat: 34.5 + (Math.random() - 0.5) * 4,
-      lng: -112 + (Math.random() - 0.5) * 6,
+      lat: 26 + ((h % 1000) / 1000) * 22,
+      lng: -124 + ((((h / 1000) | 0) % 1000) / 1000) * 56,
     };
   }
 
   function regionFromLocation(loc) {
-    const l = loc.toLowerCase();
-    if (/nv|az|nm|las vegas|phoenix|tucson|henderson|mesa/.test(l)) return "Southwest Region";
-    if (/ca|san diego|los angeles/.test(l)) return "Pacific Region";
-    if (/co|ut|denver|salt lake/.test(l)) return "Mountain West";
-    if (/tx|dallas|houston/.test(l)) return "South Central";
-    if (/il|chicago|mi|oh|wi/.test(l)) return "Great Lakes";
-    if (/ga|fl|nc|sc|atlanta/.test(l)) return "Southeast Region";
+    if (
+      window.PostSwapGeocode &&
+      typeof window.PostSwapGeocode.regionFromLocation === "function"
+    ) {
+      return window.PostSwapGeocode.regionFromLocation(loc);
+    }
     return "United States";
+  }
+
+  /** Invalidate map size and fit pins after data load / layout */
+  function forceMapRefresh(filtered) {
+    if (!map) return;
+    var list = filtered || getFilteredSwaps();
+    // Multiple passes help when the explore panel was hidden during first paint
+    var pass = function () {
+      try {
+        map.invalidateSize({ animate: false });
+      } catch (_) { /* ignore */ }
+      if (list.length) {
+        try {
+          var bounds = L.latLngBounds(
+            list.map(function (s) {
+              return [Number(s.lat), Number(s.lng)];
+            })
+          );
+          if (bounds.isValid()) {
+            map.fitBounds(bounds.pad(0.2), {
+              maxZoom: list.length === 1 ? 8 : 5,
+              animate: true,
+            });
+          }
+        } catch (err) {
+          console.warn("[PostSwap] fitBounds failed", err);
+          map.setView([39.5, -98.35], 4);
+        }
+      } else {
+        map.setView([39.5, -98.35], 4);
+      }
+    };
+    pass();
+    setTimeout(pass, 50);
+    setTimeout(pass, 250);
+    setTimeout(pass, 600);
   }
 
   function badgeClass(type) {
@@ -716,8 +746,15 @@
     markersLayer = L.layerGroup().addTo(map);
 
     // Fix tiles when container becomes visible / resized
-    setTimeout(() => map.invalidateSize(), 200);
-    window.addEventListener("resize", () => map && map.invalidateSize());
+    setTimeout(function () {
+      forceMapRefresh(getFilteredSwaps());
+    }, 200);
+    window.addEventListener("resize", function () {
+      if (map) {
+        map.invalidateSize();
+        forceMapRefresh(getFilteredSwaps());
+      }
+    });
   }
 
   function createMarkerIcon(highlight) {
@@ -903,6 +940,14 @@
     const filtered = getFilteredSwaps();
     renderList(filtered);
     refreshMap(filtered);
+    // Keep map sized correctly after list/filter updates
+    if (swapsLoaded && map) {
+      setTimeout(function () {
+        try {
+          map.invalidateSize({ animate: false });
+        } catch (_) { /* ignore */ }
+      }, 0);
+    }
   }
 
   // ---------- Near Me ----------
@@ -1507,7 +1552,7 @@
     const submitBtn = $("#post-submit-btn");
     setButtonLoading(submitBtn, true);
 
-    const coords = geocodeCurrent(current);
+    const coords = geocodeCurrent(current, user && user.id ? user.id + "-" + current : current);
     const region = regionFromLocation(current);
     const draft = {
       current,

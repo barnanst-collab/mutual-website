@@ -10,31 +10,13 @@
 (function (global) {
   "use strict";
 
-  const BUILD = "2026-07-11c";
+  const BUILD = "2026-07-14a";
   const SUPABASE_URL = "https://olfystbcngdcevtndkdq.supabase.co";
   const SUPABASE_ANON_KEY =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9sZnlzdGJjbmdkY2V2dG5ka2RxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM2MzE5NTMsImV4cCI6MjA5OTIwNzk1M30.Kr47X97Wrpppt2Vs-XhOzYMsQD8PmAPwbuWEyG8xEAk";
 
   const REST = `${SUPABASE_URL}/rest/v1`;
   const MESSAGES_TABLE = "messages%20(for%20DMs)";
-
-  // Client-side geocode for map pins (swaps table has no lat/lng columns)
-  const CITY_COORDS = {
-    "north las vegas": { lat: 36.1989, lng: -115.1175 },
-    "las vegas": { lat: 36.1699, lng: -115.1398 },
-    henderson: { lat: 36.0395, lng: -114.9817 },
-    phoenix: { lat: 33.4484, lng: -112.074 },
-    mesa: { lat: 33.4152, lng: -111.8315 },
-    tucson: { lat: 32.2226, lng: -110.9747 },
-    "san diego": { lat: 32.7157, lng: -117.1611 },
-    denver: { lat: 39.7392, lng: -104.9903 },
-    dallas: { lat: 32.7767, lng: -96.797 },
-    chicago: { lat: 41.8781, lng: -87.6298 },
-    atlanta: { lat: 33.749, lng: -84.388 },
-    "los angeles": { lat: 34.0522, lng: -118.2437 },
-    albuquerque: { lat: 35.0844, lng: -106.6504 },
-    "salt lake": { lat: 40.7608, lng: -111.891 },
-  };
 
   function headers(extra = {}) {
     return {
@@ -132,30 +114,31 @@
     }
   }
 
-  function geocode(cityStr) {
-    const lower = String(cityStr || "").toLowerCase();
-    for (const [key, coords] of Object.entries(CITY_COORDS)) {
-      if (lower.includes(key)) {
-        return {
-          lat: coords.lat + (Math.random() - 0.5) * 0.04,
-          lng: coords.lng + (Math.random() - 0.5) * 0.04,
-        };
-      }
+  function geocode(cityStr, seed) {
+    if (global.PostSwapGeocode && typeof global.PostSwapGeocode.geocode === "function") {
+      return global.PostSwapGeocode.geocode(cityStr, seed != null ? seed : cityStr);
     }
+    // CONUS spread fallback (never AZ-only stack)
+    var h = 2166136261;
+    var s = String(seed != null ? seed : cityStr || "us");
+    for (var i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    h = h >>> 0;
     return {
-      lat: 34.5 + (Math.random() - 0.5) * 4,
-      lng: -112 + (Math.random() - 0.5) * 6,
+      lat: 26 + ((h % 1000) / 1000) * 22,
+      lng: -124 + ((((h / 1000) | 0) % 1000) / 1000) * 56,
     };
   }
 
   function regionFromLocation(loc) {
-    const l = String(loc || "").toLowerCase();
-    if (/nv|az|nm|las vegas|phoenix|tucson|henderson|mesa/.test(l)) return "Southwest Region";
-    if (/ca|san diego|los angeles/.test(l)) return "Pacific Region";
-    if (/co|ut|denver|salt lake/.test(l)) return "Mountain West";
-    if (/tx|dallas|houston/.test(l)) return "South Central";
-    if (/il|chicago|mi|oh|wi/.test(l)) return "Great Lakes";
-    if (/ga|fl|nc|sc|atlanta/.test(l)) return "Southeast Region";
+    if (
+      global.PostSwapGeocode &&
+      typeof global.PostSwapGeocode.regionFromLocation === "function"
+    ) {
+      return global.PostSwapGeocode.regionFromLocation(loc);
+    }
     return "United States";
   }
 
@@ -163,7 +146,7 @@
   function mapSwapFromDb(row) {
     if (!row) return null;
     const current = row.current_location || "";
-    const coords = geocode(current);
+    const coords = geocode(current, row.id != null ? row.id : current);
     const region = regionFromLocation(current);
     const username = row.username || null;
     return {

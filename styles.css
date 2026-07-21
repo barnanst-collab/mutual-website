@@ -1600,6 +1600,44 @@ ul { list-style: none; }
 /* ---------- Explore ---------- */
 .explore { background: linear-gradient(180deg, #F8FAFC 0%, #FFFFFF 40%); }
 
+/* Guest banner — browse OK, participate needs account */
+.guest-participate-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.85rem 1.25rem;
+  margin-bottom: 1.15rem;
+  padding: 0.95rem 1.15rem;
+  border-radius: var(--radius-xl);
+  border: 1.5px solid rgba(0, 48, 135, 0.15);
+  background: linear-gradient(135deg, #F5F8FF 0%, #FFFAFA 100%);
+  box-shadow: var(--shadow-sm);
+}
+.guest-participate-banner[hidden] {
+  display: none !important;
+}
+.guest-participate-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+.guest-participate-copy strong {
+  color: var(--usps-blue);
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+.guest-participate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
 .filters-bar {
   display: flex;
   flex-wrap: wrap;

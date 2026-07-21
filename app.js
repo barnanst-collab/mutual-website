@@ -512,7 +512,9 @@
       user.name.split(" ")[0] +
       (user.name.split(" ")[1] ? " " + user.name.split(" ")[1][0] + "." : "");
     updateMobileAuth();
+    updateGuestParticipateBanner();
     renderMailbox();
+    if (swapsLoaded) refreshViews();
 
     if (!skipRemote) {
       persistProfileToSupabase(user).then((remote) => {
@@ -542,7 +544,12 @@
     els.authUser.classList.add("hidden");
     setMailboxOpen(false);
     updateMobileAuth();
-    showToast("Signed out", "Come back anytime — posting stays free.");
+    updateGuestParticipateBanner();
+    if (swapsLoaded) refreshViews();
+    showToast(
+      "Signed out",
+      "You can still browse the map. Sign up free to post or message."
+    );
   }
 
   function updateMobileAuth() {
@@ -814,10 +821,16 @@
         </div>
         ${s.notes ? `<div class="popup-note">“${escapeHtml(s.notes)}”</div>` : ""}
         <div class="popup-actions">
-          <button type="button" class="btn btn-primary" data-dm-id="${s.id}">Send DM</button>
+          <button type="button" class="btn btn-primary" data-dm-id="${s.id}">
+            ${user ? "Send DM" : "Sign up to DM"}
+          </button>
           ${shareButtonHtml(s)}
         </div>
-        <p class="share-nudge">Send to a buddy who might want this route!</p>
+        <p class="share-nudge">${
+          user
+            ? "Send to a buddy who might want this route!"
+            : "Browsing is free — sign up to message this carrier."
+        }</p>
       </div>
     `;
   }
@@ -924,11 +937,21 @@
           <div class="swap-privacy">${isMine ? "Your listing • visible to carriers" : escapeHtml(s.privacyLabel)}</div>
           <div class="swap-card-actions">
             <button type="button" class="btn btn-primary" data-dm-id="${s.id}">
-              ${isMine ? "View listing" : "I'm Interested → DM"}
+              ${
+                isMine
+                  ? "View listing"
+                  : user
+                    ? "I'm Interested → DM"
+                    : "Sign up to participate"
+              }
             </button>
             ${shareButtonHtml(s)}
           </div>
-          <p class="share-nudge">Send to a buddy who might want this route!</p>
+          <p class="share-nudge">${
+            user
+              ? "Send to a buddy who might want this route!"
+              : "Map browsing is public — create a free account to DM or post."
+          }</p>
         </article>
       `;
       })
@@ -1333,9 +1356,11 @@
   }
 
   async function openInbox() {
-    if (!user) {
-      openLogin();
-      showToast("Sign in first", "Log in to open My Messages.");
+    if (
+      !requireAuth(
+        "Sign up free to open My Messages — only your DMs, private to you."
+      )
+    ) {
       return;
     }
     setMailboxOpen(false);
@@ -1476,7 +1501,36 @@
     }
   }
 
+  /**
+   * Gate participate actions (post, DM, inbox). Map browsing stays public.
+   * @returns {boolean} true if logged in
+   */
+  function requireAuth(detail) {
+    if (user) return true;
+    showToast(
+      "Sign up to participate",
+      detail ||
+        "Create a free account to post swaps, message carriers, and use My Messages. Browsing the map stays public."
+    );
+    openRegister();
+    return false;
+  }
+
+  function updateGuestParticipateBanner() {
+    const banner = $("#guest-participate-banner");
+    if (!banner) return;
+    banner.hidden = !!user;
+    banner.setAttribute("aria-hidden", user ? "true" : "false");
+  }
+
   function openPostModal() {
+    if (
+      !requireAuth(
+        "Sign up free to post a swap and find mutual matches. Anyone can still browse the map."
+      )
+    ) {
+      return;
+    }
     openModal(els.modalPost);
   }
 
@@ -1489,9 +1543,9 @@
   }
 
   function openMySwaps() {
-    if (!user) {
-      openLogin();
-      showToast("Sign in first", "Log in to see and manage your posted swaps.");
+    if (
+      !requireAuth("Sign up free to manage your posted swaps.")
+    ) {
       return;
     }
     const mine = swaps.filter((s) => idEq(s.ownerId, user.id));
@@ -1538,6 +1592,14 @@
   }
 
   async function openDm(swap) {
+    if (
+      !requireAuth(
+        "Sign up free to message carriers about swaps. Browsing open listings stays public."
+      )
+    ) {
+      return;
+    }
+
     if (user && idEq(swap.ownerId, user.id)) {
       showToast("That's your swap", "Other carriers will message you when they're interested.");
       return;
@@ -1623,6 +1685,11 @@
 
   async function sendDm(e) {
     e.preventDefault();
+    if (
+      !requireAuth("Sign up free to send DMs to other carriers.")
+    ) {
+      return;
+    }
     const text = els.dmInput.value.trim();
     if (!text || !currentDmSwap) return;
 
@@ -1715,6 +1782,11 @@
   async function handlePost(e) {
     e.preventDefault();
     console.log("[PostSwap] handlePost: form submit");
+    if (
+      !requireAuth("Sign up free to post a swap. Guests can still browse the map.")
+    ) {
+      return;
+    }
 
     const current = $("#post-current").value.trim();
     const desired = $("#post-desired").value.trim();
@@ -2297,6 +2369,7 @@
     bindEvents();
     updateMobileAuth();
     restoreSession();
+    updateGuestParticipateBanner();
     renderMailbox();
     refreshViews(); // empty state until load finishes
     initHeroDrive();

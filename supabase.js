@@ -504,6 +504,38 @@
     return fetchMessagesForUser(null, limit);
   }
 
+  /** Recent email_queue rows for this user's email (real notification activity). */
+  async function fetchEmailQueueForUser(email, limit) {
+    if (!email) return [];
+    const lim = Math.min(Math.max(Number(limit) || 30, 1), 100);
+    console.log("[PostSwapDB] fetchEmailQueueForUser()", email);
+    try {
+      const rows = await request(
+        "/email_queue?to_email=eq." +
+          encodeURIComponent(String(email)) +
+          "&select=*&order=created_at.desc&limit=" +
+          lim
+      );
+      return (rows || []).map(function (r) {
+        return {
+          id: r.id,
+          toEmail: r.to_email,
+          subject: r.subject,
+          body: r.body,
+          eventType: r.event_type,
+          status: r.status,
+          createdAt: r.created_at,
+          meta: r.meta || {},
+        };
+      });
+    } catch (err) {
+      // Table may not exist yet
+      console.warn("[PostSwapDB] fetchEmailQueueForUser skipped", err && err.message);
+      if (err && (err.status === 404 || err.status === 400)) return [];
+      throw err;
+    }
+  }
+
   async function sendMessage({ swapId, senderId, toUser, body }) {
     const payload = {
       swap_id: String(swapId),
@@ -1082,6 +1114,7 @@
     fetchMessages: fetchMessages,
     fetchMessagesForUser: fetchMessagesForUser,
     fetchAllMessages: fetchAllMessages,
+    fetchEmailQueueForUser: fetchEmailQueueForUser,
     userIdentityKeys: userIdentityKeys,
     sendMessage: sendMessage,
     fetchProfile: fetchProfile,

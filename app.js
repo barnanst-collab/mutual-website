@@ -310,64 +310,183 @@
     }, 3500);
   }
 
-  // ---------- In-app mailbox notifications ----------
-  const NOTIF_STORAGE_KEY = "postswap_mailbox";
+  // ---------- In-app mailbox (real activity only) ----------
+  // Only stores which notification IDs the user has read — no demo content.
+  const MAIL_READ_KEY = "postswap_mailbox_read_ids";
+  // Clear legacy demo mailbox payload if present
+  try {
+    localStorage.removeItem("postswap_mailbox");
+  } catch (_) { /* ignore */ }
 
-  const DEFAULT_MAIL = [
-    {
-      id: "n1",
-      type: "dm",
-      text: "New message from Verified Carrier in Phoenix",
-      time: "12 min ago",
-      unread: true,
-    },
-    {
-      id: "n2",
-      type: "interest",
-      text: "3 carriers interested in your North Las Vegas swap",
-      time: "1 hr ago",
-      unread: true,
-    },
-    {
-      id: "n3",
-      type: "nearby",
-      text: "New swap posted near you in Tucson",
-      time: "3 hr ago",
-      unread: true,
-    },
-  ];
+  let mailItems = [];
+  let mailReadIds = loadMailReadIds();
+  let mailboxLoading = false;
 
-  let mailItems = loadMailItems();
-
-  function loadMailItems() {
+  function loadMailReadIds() {
     try {
-      const raw = localStorage.getItem(NOTIF_STORAGE_KEY);
+      const raw = localStorage.getItem(MAIL_READ_KEY);
       if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length) return parsed;
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) return new Set(arr.map(String));
       }
     } catch (_) { /* ignore */ }
-    return DEFAULT_MAIL.map((n) => ({ ...n }));
+    return new Set();
   }
 
-  function saveMailItems() {
+  function saveMailReadIds() {
     try {
-      localStorage.setItem(NOTIF_STORAGE_KEY, JSON.stringify(mailItems));
+      localStorage.setItem(MAIL_READ_KEY, JSON.stringify(Array.from(mailReadIds)));
     } catch (_) { /* ignore */ }
   }
 
   function unreadCount() {
-    return mailItems.filter((n) => n.unread).length;
+    return mailItems.filter(function (n) {
+      return n.unread;
+    }).length;
   }
 
   function iconSvg(type) {
     if (type === "dm") {
       return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>`;
     }
-    if (type === "interest") {
-      return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.8 4.6a5.5 5.5 0 00-7.8 0L12 5.6l-1-1a5.5 5.5 0 00-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 000-7.8z"/></svg>`;
+    if (type === "interest" || type === "matching_swap") {
+      return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2C8.1 2 5 5.1 5 9c0 5.2 7 13 7 13s7-7.8 7-13c0-3.9-3.1-7-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg>`;
+    }
+    if (type === "email" || type === "new_dm") {
+      return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M22 6l-10 7L2 6"/></svg>`;
     }
     return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2C8.1 2 5 5.1 5 9c0 5.2 7 13 7 13s7-7.8 7-13c0-3.9-3.1-7-7-7z"/><circle cx="12" cy="9" r="2.5"/></svg>`;
+  }
+
+  function relativeTimeLabel(iso) {
+    if (!iso) return "";
+    try {
+      const d = new Date(iso);
+      const sec = Math.max(0, (Date.now() - d.getTime()) / 1000);
+      if (sec < 60) return "Just now";
+      if (sec < 3600) return Math.floor(sec / 60) + " min ago";
+      if (sec < 86400) return Math.floor(sec / 3600) + " hr ago";
+      if (sec < 86400 * 7) return Math.floor(sec / 86400) + "d ago";
+      return d.toLocaleDateString([], { month: "short", day: "numeric" });
+    } catch (_) {
+      return "";
+    }
+  }
+
+  /**
+   * Build mailbox feed from real Supabase activity:
+   * - DMs involving the current user
+   * - email_queue rows for their email (if table exists)
+   */
+  async function refreshMailboxFromDb() {
+    if (!user) {
+      mailItems = [];
+      renderMailbox();
+      return;
+    }
+
+    mailboxLoading = true;
+    renderMailbox();
+
+    const items = [];
+    const identity = (
+      db() && typeof db().userIdentityKeys === "function"
+        ? db().userIdentityKeys(user)
+        : [user.id, user.email, user.name]
+    ).map(function (k) {
+      return String(k || "").toLowerCase();
+    });
+
+    // 1) Real DMs
+    if (useSupabase && db() && typeof db().fetchMessagesForUser === "function") {
+      try {
+        const msgs = await db().fetchMessagesForUser(user, 80);
+        // One notification per swap thread (latest message)
+        const bySwap = new Map();
+        (msgs || []).forEach(function (m) {
+          const key = String(m.swapId);
+          const prev = bySwap.get(key);
+          if (!prev || new Date(m.createdAt || 0) > new Date(prev.createdAt || 0)) {
+            bySwap.set(key, m);
+          }
+        });
+
+        bySwap.forEach(function (m) {
+          const fromMe =
+            identity.indexOf(String(m.senderId || "").toLowerCase()) !== -1;
+          const swap = findSwapById(m.swapId);
+          const route = swap
+            ? swap.current + " → " + swap.desired
+            : "Swap #" + m.swapId;
+          const who = fromMe
+            ? "You"
+            : m.senderId && String(m.senderId).length < 40
+              ? String(m.senderId)
+              : "A carrier";
+          const text = fromMe
+            ? "You messaged about " + route
+            : "New message from " + who + " · " + route;
+          const nid = "dm-" + String(m.id);
+          items.push({
+            id: nid,
+            type: "dm",
+            text: text,
+            preview: m.body || "",
+            time: relativeTimeLabel(m.createdAt),
+            createdAt: m.createdAt,
+            unread: !mailReadIds.has(nid),
+            swapId: m.swapId,
+            action: "dm",
+          });
+        });
+      } catch (err) {
+        console.warn("[PostSwap] mailbox DM load failed", err);
+      }
+    }
+
+    // 2) Real email_queue notifications for this user
+    if (
+      useSupabase &&
+      db() &&
+      user.email &&
+      typeof db().fetchEmailQueueForUser === "function"
+    ) {
+      try {
+        const emails = await db().fetchEmailQueueForUser(user.email, 30);
+        (emails || []).forEach(function (row) {
+          const nid = "eq-" + String(row.id);
+          const et = row.eventType || "email";
+          let type = "email";
+          if (et === "new_dm") type = "dm";
+          else if (et === "matching_swap") type = "matching_swap";
+          else if (et === "interest") type = "interest";
+          items.push({
+            id: nid,
+            type: type,
+            text: row.subject || "PostSwap notification",
+            preview: (row.body || "").slice(0, 120),
+            time: relativeTimeLabel(row.createdAt),
+            createdAt: row.createdAt,
+            unread: !mailReadIds.has(nid),
+            swapId: row.meta && (row.meta.swap_id || row.meta.swapId),
+            action: "email",
+          });
+        });
+      } catch (err) {
+        console.warn("[PostSwap] mailbox email_queue load failed", err);
+      }
+    }
+
+    // Newest first; prefer unread
+    items.sort(function (a, b) {
+      if (a.unread !== b.unread) return a.unread ? -1 : 1;
+      return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
+    });
+
+    mailItems = items;
+    mailboxLoading = false;
+    renderMailbox();
+    console.log("[PostSwap] mailbox real items:", mailItems.length);
   }
 
   function renderMailbox() {
@@ -377,8 +496,7 @@
     els.mailbox.classList.toggle("has-unread", count > 0);
     els.mailbox.classList.remove("level-1", "level-2", "level-3");
     if (count > 0) {
-      const level = Math.min(3, count);
-      els.mailbox.classList.add(`level-${level}`);
+      els.mailbox.classList.add("level-" + Math.min(3, count));
     }
 
     if (els.mailboxBadge) {
@@ -393,12 +511,31 @@
     if (els.mailboxBtn) {
       els.mailboxBtn.setAttribute(
         "aria-label",
-        count > 0 ? `Notifications, ${count} unread` : "Notifications"
+        count > 0 ? "Notifications, " + count + " unread" : "Notifications"
       );
     }
 
     if (els.mailboxMarkAll) {
-      els.mailboxMarkAll.disabled = count === 0;
+      els.mailboxMarkAll.disabled = count === 0 || mailboxLoading;
+    }
+
+    if (mailboxLoading && !mailItems.length) {
+      els.mailboxList.innerHTML = `
+        <div class="inbox-loading" style="padding:1.25rem">
+          <span class="loading-spinner loading-spinner-sm" aria-hidden="true"></span>
+          Loading activity…
+        </div>
+      `;
+      return;
+    }
+
+    if (!user) {
+      els.mailboxList.innerHTML = `
+        <div class="mailbox-empty">
+          <p><strong>Sign in for activity</strong><br/>Your real DMs and alerts show up here.</p>
+        </div>
+      `;
+      return;
     }
 
     if (!mailItems.length) {
@@ -407,25 +544,43 @@
           <div class="mailbox-empty-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M22 6l-10 7L2 6"/></svg>
           </div>
-          <p><strong>Mailbox is empty</strong><br/>You're all caught up — no new carrier updates.</p>
+          <p><strong>No activity yet</strong><br/>When you get real DMs or match alerts, they’ll show up here.</p>
         </div>
       `;
       return;
     }
 
     els.mailboxList.innerHTML = mailItems
-      .map(
-        (n) => `
-      <button type="button" class="mailbox-item${n.unread ? " unread" : ""}" data-mail-id="${n.id}" role="menuitem">
-        <span class="mailbox-dot" aria-hidden="true"></span>
-        <span class="mailbox-item-icon ${escapeHtml(n.type)}" aria-hidden="true">${iconSvg(n.type)}</span>
-        <span class="mailbox-item-body">
-          <p>${escapeHtml(n.text)}</p>
-          <span class="mailbox-item-meta">${escapeHtml(n.time)}${n.unread ? " · New" : ""}</span>
-        </span>
-      </button>
-    `
-      )
+      .map(function (n) {
+        return (
+          '<button type="button" class="mailbox-item' +
+          (n.unread ? " unread" : "") +
+          '" data-mail-id="' +
+          escapeHtml(String(n.id)) +
+          '" role="menuitem">' +
+          '<span class="mailbox-dot" aria-hidden="true"></span>' +
+          '<span class="mailbox-item-icon ' +
+          escapeHtml(n.type) +
+          '" aria-hidden="true">' +
+          iconSvg(n.type) +
+          "</span>" +
+          '<span class="mailbox-item-body">' +
+          "<p>" +
+          escapeHtml(n.text) +
+          "</p>" +
+          (n.preview
+            ? '<span class="mailbox-item-meta" style="display:block;margin-top:0.2rem;opacity:0.85">' +
+              escapeHtml(n.preview) +
+              "</span>"
+            : "") +
+          '<span class="mailbox-item-meta">' +
+          escapeHtml(n.time || "") +
+          (n.unread ? " · New" : "") +
+          "</span>" +
+          "</span>" +
+          "</button>"
+        );
+      })
       .join("");
   }
 
@@ -435,40 +590,66 @@
     els.mailboxBtn.setAttribute("aria-expanded", open ? "true" : "false");
   }
 
-  function toggleMailbox(e) {
+  async function toggleMailbox(e) {
     if (e) {
       e.preventDefault();
       e.stopPropagation();
     }
     if (!user) {
-      openLogin();
-      showToast("Sign in first", "Log in to check your mailbox.");
+      requireAuth(
+        "Sign up free to see real mailbox activity from your DMs and alerts."
+      );
       return;
     }
     const open = els.mailboxPanel.hidden;
     setMailboxOpen(open);
-    if (open) closeMobileMenu();
+    if (open) {
+      closeMobileMenu();
+      await refreshMailboxFromDb();
+    }
   }
 
   function markAllMailRead() {
-    mailItems = mailItems.map((n) => ({ ...n, unread: false }));
-    saveMailItems();
+    mailItems.forEach(function (n) {
+      mailReadIds.add(String(n.id));
+      n.unread = false;
+    });
+    saveMailReadIds();
     renderMailbox();
-    showToast("Mailbox cleared", "All notifications marked as read.");
+    showToast("Mailbox cleared", "All activity marked as read.");
   }
 
   function markOneMailRead(id) {
-    mailItems = mailItems.map((n) =>
-      n.id === id ? { ...n, unread: false } : n
-    );
-    saveMailItems();
+    mailReadIds.add(String(id));
+    mailItems = mailItems.map(function (n) {
+      return String(n.id) === String(id) ? Object.assign({}, n, { unread: false }) : n;
+    });
+    saveMailReadIds();
     renderMailbox();
   }
 
-  function resetDemoMail() {
-    mailItems = DEFAULT_MAIL.map((n) => ({ ...n }));
-    saveMailItems();
-    renderMailbox();
+  function onMailboxItemClick(id) {
+    const item = mailItems.find(function (n) {
+      return String(n.id) === String(id);
+    });
+    markOneMailRead(id);
+    if (!item) return;
+    if (item.swapId && item.action === "dm") {
+      setMailboxOpen(false);
+      const swap = findSwapById(item.swapId);
+      if (swap) {
+        if (user && idEq(swap.ownerId, user.id)) {
+          openInbox();
+        } else {
+          openDm(swap);
+        }
+      } else {
+        openInbox();
+      }
+    } else if (item.action === "email") {
+      setMailboxOpen(false);
+      openInbox();
+    }
   }
 
   function newUserId() {
@@ -514,6 +695,7 @@
     updateMobileAuth();
     updateGuestParticipateBanner();
     renderMailbox();
+    refreshMailboxFromDb();
     if (swapsLoaded) refreshViews();
 
     if (!skipRemote) {
@@ -545,6 +727,8 @@
     setMailboxOpen(false);
     updateMobileAuth();
     updateGuestParticipateBanner();
+    mailItems = [];
+    renderMailbox();
     if (swapsLoaded) refreshViews();
     showToast(
       "Signed out",
@@ -574,10 +758,6 @@
   }
 
   function demoLogin() {
-    // Refresh sample mail so the mailbox looks full again for demos
-    if (!localStorage.getItem(NOTIF_STORAGE_KEY) || unreadCount() === 0) {
-      resetDemoMail();
-    }
     setLoggedIn({
       id: "demo-1",
       name: "Maria Chen",
@@ -702,28 +882,6 @@
       n.emailEnabled
         ? `Notifications for ${summary} will go to ${email}.`
         : `Saved. Email notifications are disabled for ${email}.`
-    );
-  }
-
-  /** Demo helper: show what an email alert would look like */
-  function simulateEmailAlert(type, detail) {
-    if (!user?.notifications?.emailEnabled) return;
-    const n = user.notifications;
-    const map = {
-      interest: n.onInterest,
-      state: n.onStateSwap,
-      dm: n.onDm,
-    };
-    if (!map[type]) return;
-
-    const titles = {
-      interest: "Interest in your swap",
-      state: "New swap in your state",
-      dm: "New DM message",
-    };
-    showToast(
-      `Email → ${user.email}`,
-      `${titles[type]}: ${detail}`
     );
   }
 
@@ -1739,7 +1897,10 @@
                   ? `DM alert queued for ${notify.to}`
                   : "Owner will be emailed if notifications are on."
               );
+              // Refresh mailbox for recipient sessions later; sender stays clean
             }
+            // Sender's own mailbox: refresh so "You messaged…" can appear if desired
+            refreshMailboxFromDb();
           } catch (notifyErr) {
             console.warn("[PostSwap] sendDm: email notify failed", notifyErr);
           }
@@ -2063,7 +2224,7 @@
         const item = e.target.closest("[data-mail-id]");
         if (!item) return;
         e.stopPropagation();
-        markOneMailRead(item.getAttribute("data-mail-id"));
+        onMailboxItemClick(item.getAttribute("data-mail-id"));
       });
     }
     document.addEventListener("click", (e) => {
@@ -2291,27 +2452,6 @@
       );
     });
 
-    // Demo interest: when clicking I'm Interested on a card, if user has a posted swap
-    // and interest emails on, simulate "someone interested" when they message about matching
-    document.addEventListener("click", (e) => {
-      const dmBtn = e.target.closest("[data-dm-id]");
-      if (!dmBtn || !user) return;
-      const id = dmBtn.getAttribute("data-dm-id");
-      const swap = findSwapById(id);
-      if (!swap) return;
-      if (idEq(swap.ownerId, user.id)) return;
-      if (user.notifications?.emailEnabled && user.notifications.onInterest) {
-        const mine = swaps.some((s) => idEq(s.ownerId, user.id));
-        if (mine) {
-          setTimeout(() => {
-            simulateEmailAlert(
-              "interest",
-              "A verified carrier viewed your listing and may reach out"
-            );
-          }, 400);
-        }
-      }
-    }, true);
   }
 
   // ---------- Hero truck video (Grok LLV clip) ----------

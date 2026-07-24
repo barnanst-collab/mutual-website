@@ -2070,7 +2070,7 @@
         : "Your request is on the map. Login to manage it under My Swaps."
     );
 
-    // Email carriers whose home state matches this listing
+    // Email carriers: same home state AND exact craft match only
     if (
       savedRemote &&
       useSupabase &&
@@ -2082,11 +2082,13 @@
           swap: newSwap,
           excludeUserId: user ? user.id : null,
         });
-        console.log("[PostSwap] handlePost: matching-swap emails", matchNotify);
+        console.log("[PostSwap] handlePost: matching-swap emails (state+craft)", matchNotify);
         if (matchNotify && matchNotify.queued > 0) {
           showToast(
             "Match emails queued",
-            `${matchNotify.queued} carrier${matchNotify.queued === 1 ? "" : "s"} notified about this area.`
+            `${matchNotify.queued} ${newSwap.craft || "carrier"}${
+              matchNotify.queued === 1 ? "" : "s"
+            } in matching states notified.`
           );
         }
       } catch (notifyErr) {

@@ -834,13 +834,39 @@
     return { queued: 1, row, dispatch, to: owner.email };
   }
 
+  function normalizeCraft(craft) {
+    return String(craft || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+  }
+
+  function craftsMatchExactly(a, b) {
+    const ca = normalizeCraft(a);
+    const cb = normalizeCraft(b);
+    if (!ca || !cb) return false;
+    // Strict exact match only — no "any craft" / partial / family matching
+    return ca === cb;
+  }
+
   /**
-   * Notify carriers who want emails about matching / nearby swaps.
-   * Matches home state against current or desired location text.
+   * Notify carriers about a new swap ONLY when:
+   *  1) listing involves their home state, AND
+   *  2) craft exactly matches their profile craft
+   * (No "any craft" option.)
    */
   async function notifyMatchingSwap({ swap, excludeUserId }) {
-    console.log("[PostSwapDB] notifyMatchingSwap", { swapId: swap && swap.id });
+    console.log("[PostSwapDB] notifyMatchingSwap", {
+      swapId: swap && swap.id,
+      craft: swap && swap.craft,
+    });
     if (!swap) return { queued: 0 };
+
+    const swapCraft = normalizeCraft(swap.craft);
+    if (!swapCraft) {
+      console.log("[PostSwapDB] notifyMatchingSwap: swap has no craft — skip");
+      return { queued: 0, reason: "no_swap_craft" };
+    }
 
     let profiles = [];
     try {
@@ -869,29 +895,36 @@
       if (!wantsEmail(p, "matching_swap")) return false;
       if (excludeUserId && String(p.id) === String(excludeUserId)) return false;
       if (!p.state) return false;
+      // Strict craft match required
+      if (!craftsMatchExactly(p.craft, swap.craft)) return false;
       const abbr = String(p.state).toUpperCase();
       const full = STATE_NAMES[abbr] || "";
-      return hay.includes(abbr) || (full && hay.includes(full));
+      const stateHit = hay.includes(abbr) || (full && hay.includes(full));
+      return stateHit;
     });
 
-    console.log("[PostSwapDB] notifyMatchingSwap recipients:", recipients.length);
+    console.log("[PostSwapDB] notifyMatchingSwap recipients (state+exact craft):", {
+      count: recipients.length,
+      swapCraft: swap.craft,
+    });
 
     const queued = [];
     const route = `${swap.current || "?"} → ${swap.desired || "?"}`;
     for (const p of recipients) {
-      const subject = `New PostSwap listing may match you (${p.state})`;
+      const subject = `New ${swap.craft} swap in ${p.state}`;
       const body = [
         `Hi ${p.name || "Carrier"},`,
         "",
-        `A new mutual swap was posted that involves your state (${p.state}):`,
+        `A new mutual swap was posted in your state (${p.state}) for your craft:`,
         route,
-        `Craft: ${swap.craft || "—"} · Seniority: ${swap.seniority != null ? swap.seniority : "—"} yrs`,
+        `Craft: ${swap.craft} (exact match to your profile)`,
+        `Seniority: ${swap.seniority != null ? swap.seniority : "—"} yrs`,
         swap.notes ? `Note: ${swap.notes}` : "",
         "",
         `Browse Open Swaps on PostSwap to learn more or send a DM.`,
         "",
         `— PostSwap`,
-        `Turn off “New swap in my state” anytime in Profile → Email notifications.`,
+        `You only get these when craft matches yours exactly. Turn off in Profile → Email notifications.`,
       ]
         .filter(Boolean)
         .join("\n");
@@ -903,9 +936,15 @@
           subject,
           body,
           eventType: "matching_swap",
-          meta: { swap_id: swap.id, state: p.state },
+          meta: {
+            swap_id: swap.id,
+            state: p.state,
+            craft: swap.craft,
+            profile_craft: p.craft,
+            craft_match: "exact",
+          },
         });
-        queued.push({ email: p.email, id: row && row.id });
+        queued.push({ email: p.email, id: row && row.id, craft: p.craft });
       } catch (err) {
         console.warn("[PostSwapDB] notifyMatchingSwap queue failed for", p.email, err);
       }

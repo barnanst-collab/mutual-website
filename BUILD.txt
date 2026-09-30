@@ -30,4 +30,11 @@ Redeploy checklist
 4. Probe inserts:
    await PostSwapDB.testAnonInserts()
 
-Cache bust query on assets in index.html: ?v=20260711a
+Map modes (2026-09-30a)
+-----------------------
+Explore map still uses Leaflet + OpenStreetMap.
+Leaving from = current location. Coming to = desired location.
+Clusters and same-spot offsets are in app.js. No extra map API.
+
+Cache bust query on assets in index.html: ?v=20260930a
+(styles.css, geocode.js, app.js). supabase.js is still ?v=20260715f.

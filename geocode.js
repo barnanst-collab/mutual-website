@@ -353,6 +353,10 @@
     };
   }
 
+  function withQuality(point, quality) {
+    return { lat: point.lat, lng: point.lng, quality: quality };
+  }
+
   /** Spread unknown places across CONUS so they don't stack in AZ */
   function usSpreadFallback(seed) {
     var s = typeof seed === "number" ? seed : hashStr(seed);
@@ -400,18 +404,18 @@
     for (var i = 0; i < CITY_KEYS.length; i++) {
       var key = CITY_KEYS[i];
       if (lower.indexOf(key) !== -1) {
-        return jitter(CITY_COORDS[key], h, 0.08);
+        return withQuality(jitter(CITY_COORDS[key], h, 0.08), "city");
       }
     }
 
     // 2) State from ", XX" / full name → state centroid with wider spread
     var st = extractStateAbbr(lower);
     if (st && STATE_COORDS[st]) {
-      return jitter(STATE_COORDS[st], h, 1.8);
+      return withQuality(jitter(STATE_COORDS[st], h, 1.8), "state");
     }
 
     // 3) Last-resort CONUS spread (NOT Arizona-only)
-    return usSpreadFallback(h);
+    return withQuality(usSpreadFallback(h), "approx");
   }
 
   function regionFromLocation(loc) {

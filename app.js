@@ -30,6 +30,11 @@
   let markersLayer = null;
   let markerById = new Map();
   let activeSwapId = null;
+  // "leaving" = pins on current location. "coming" = pins on desired location.
+  let mapMode = "leaving";
+  // Set by Near Me. Null means show the whole filtered list.
+  let nearMeCenter = null;
+  const NEAR_ME_MILES = 150;
   let currentDmSwap = null;
   let user = null; // full profile + notification prefs
   let useSupabase = typeof window.PostSwapDB !== "undefined";
@@ -72,14 +77,7 @@
       const remote = await db().fetchSwaps();
       swaps = Array.isArray(remote) ? remote : [];
       // Re-geocode on client so pins use latest city/state logic even if DB has no lat/lng
-      swaps = swaps.map(function (s) {
-        var coords = geocodeCurrent(s.current, s.id);
-        return Object.assign({}, s, {
-          lat: coords.lat,
-          lng: coords.lng,
-          region: s.region || regionFromLocation(s.current),
-        });
-      });
+      swaps = swaps.map(withPinCoords);
       swapsLoaded = true;
       refreshViews();
       forceMapRefresh(getFilteredSwaps());
@@ -140,6 +138,10 @@
     filterCity: $("#filter-city"),
     filterCraft: $("#filter-craft"),
     nearMeBtn: $("#near-me-btn"),
+    modeLeaving: $("#mode-leaving"),
+    modeComing: $("#mode-coming"),
+    mapModeHelp: $("#map-mode-help"),
+    listModeNote: $("#list-mode-note"),
     swapList: $("#swap-list"),
     listCount: $("#list-count"),
     overlay: $("#modal-overlay"),
@@ -219,7 +221,12 @@
 
   function geocodeCurrent(cityStr, seed) {
     if (window.PostSwapGeocode && typeof window.PostSwapGeocode.geocode === "function") {
-      return window.PostSwapGeocode.geocode(cityStr, seed || cityStr);
+      var hit = window.PostSwapGeocode.geocode(cityStr, seed || cityStr);
+      return {
+        lat: hit.lat,
+        lng: hit.lng,
+        quality: hit.quality || "approx",
+      };
     }
     // Minimal fallback if geocode.js missing — spread across CONUS, not AZ-only
     var h = 0;
@@ -228,7 +235,25 @@
     return {
       lat: 26 + ((h % 1000) / 1000) * 22,
       lng: -124 + ((((h / 1000) | 0) % 1000) / 1000) * 56,
+      quality: "approx",
     };
+  }
+
+  /** Attach current + desired coordinates. Never stacks unknowns on one default point. */
+  function withPinCoords(s) {
+    var currentCoords = geocodeCurrent(s.current, (s.id != null ? s.id : s.current || "") + "|from");
+    var desiredCoords = geocodeCurrent(s.desired, (s.id != null ? s.id : s.desired || "") + "|to");
+    return Object.assign({}, s, {
+      lat: currentCoords.lat,
+      lng: currentCoords.lng,
+      currentLat: currentCoords.lat,
+      currentLng: currentCoords.lng,
+      currentQuality: currentCoords.quality || "approx",
+      desiredLat: desiredCoords.lat,
+      desiredLng: desiredCoords.lng,
+      desiredQuality: desiredCoords.quality || "approx",
+      region: s.region || regionFromLocation(s.current),
+    });
   }
 
   function regionFromLocation(loc) {
@@ -254,7 +279,8 @@
         try {
           var bounds = L.latLngBounds(
             list.map(function (s) {
-              return [Number(s.lat), Number(s.lng)];
+              var pin = activePin(s);
+              return [pin.lat, pin.lng];
             })
           );
           if (bounds.isValid()) {
@@ -886,18 +912,198 @@
   }
 
   // ---------- Filtering ----------
+  function activeLocationText(s) {
+    return mapMode === "coming" ? s.desired || "" : s.current || "";
+  }
+
+  function otherLocationText(s) {
+    return mapMode === "coming" ? s.current || "" : s.desired || "";
+  }
+
+  /** Pin for the question currently on screen. One pin per swap. */
+  function activePin(s) {
+    if (mapMode === "coming") {
+      var lat = s.desiredLat != null ? Number(s.desiredLat) : Number(s.lat);
+      var lng = s.desiredLng != null ? Number(s.desiredLng) : Number(s.lng);
+      return {
+        lat: lat,
+        lng: lng,
+        quality: s.desiredQuality || "approx",
+        label: s.desired || "",
+      };
+    }
+    return {
+      lat: s.currentLat != null ? Number(s.currentLat) : Number(s.lat),
+      lng: s.currentLng != null ? Number(s.currentLng) : Number(s.lng),
+      quality: s.currentQuality || "approx",
+      label: s.current || "",
+    };
+  }
+
+  function milesBetween(aLat, aLng, bLat, bLng) {
+    var R = 3958.8;
+    var toRad = function (d) { return (d * Math.PI) / 180; };
+    var dLat = toRad(bLat - aLat);
+    var dLng = toRad(bLng - aLng);
+    var lat1 = toRad(aLat);
+    var lat2 = toRad(bLat);
+    var h =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+  }
+
+  /**
+   * Swaps that land on the same spot are walked around a small circle
+   * so every pin stays clickable. A lone pin stays on its real coordinate.
+   */
+  function spreadPins(items) {
+    var n = items.length;
+    var parent = [];
+    for (var i = 0; i < n; i++) parent.push(i);
+    function find(i) {
+      while (parent[i] !== i) {
+        parent[i] = parent[parent[i]];
+        i = parent[i];
+      }
+      return i;
+    }
+    function near(a, b) {
+      return Math.abs(a.lat - b.lat) < 0.015 && Math.abs(a.lng - b.lng) < 0.02;
+    }
+    for (var i = 0; i < n; i++) {
+      for (var j = i + 1; j < n; j++) {
+        if (near(items[i], items[j])) parent[find(j)] = find(i);
+      }
+    }
+    var groups = new Map();
+    for (var g = 0; g < n; g++) {
+      var root = find(g);
+      if (!groups.has(root)) groups.set(root, []);
+      groups.get(root).push(items[g]);
+    }
+    var placed = new Map();
+    groups.forEach(function (group) {
+      if (group.length === 1) {
+        placed.set(String(group[0].id), { lat: group[0].lat, lng: group[0].lng });
+        return;
+      }
+      var lat0 = 0;
+      var lng0 = 0;
+      group.forEach(function (item) {
+        lat0 += item.lat;
+        lng0 += item.lng;
+      });
+      lat0 /= group.length;
+      lng0 /= group.length;
+      // Chord stays wide enough to tap once clusters break apart (~zoom 12).
+      var minChord = 0.014;
+      var sinTerm = Math.sin(Math.PI / group.length);
+      var radiusDeg = Math.min(0.06, minChord / (2 * Math.max(sinTerm, 0.12)));
+      var lngScale = Math.max(0.25, Math.cos((lat0 * Math.PI) / 180));
+      group.forEach(function (item, idx) {
+        var angle = (2 * Math.PI * idx) / group.length - Math.PI / 2;
+        placed.set(String(item.id), {
+          lat: lat0 + radiusDeg * Math.cos(angle),
+          lng: lng0 + (radiusDeg * Math.sin(angle)) / lngScale,
+        });
+      });
+    });
+    return placed;
+  }
+
   function getFilteredSwaps() {
     const city = (els.filterCity.value || "").trim().toLowerCase();
     const craft = els.filterCraft.value;
 
-    return swaps.filter((s) => {
+    const filtered = swaps.filter((s) => {
+      // Exact craft match only. Blank means "all crafts" (no extra craft invented).
       if (craft && s.craft !== craft) return false;
+      if (nearMeCenter) {
+        var pin = activePin(s);
+        if (!isFinite(pin.lat) || !isFinite(pin.lng)) return false;
+        if (milesBetween(nearMeCenter.lat, nearMeCenter.lng, pin.lat, pin.lng) > NEAR_ME_MILES) {
+          return false;
+        }
+      }
       if (city) {
-        const hay = `${s.current} ${s.desired} ${s.region} ${s.notes}`.toLowerCase();
-        if (!hay.includes(city)) return false;
+        var primary = activeLocationText(s).toLowerCase();
+        var other = otherLocationText(s).toLowerCase();
+        var extra = `${s.region || ""} ${s.notes || ""}`.toLowerCase();
+        if (!primary.includes(city) && !other.includes(city) && !extra.includes(city)) return false;
       }
       return true;
     });
+
+    filtered.sort(function (a, b) {
+      if (nearMeCenter) {
+        var da = milesBetween(nearMeCenter.lat, nearMeCenter.lng, activePin(a).lat, activePin(a).lng);
+        var db = milesBetween(nearMeCenter.lat, nearMeCenter.lng, activePin(b).lat, activePin(b).lng);
+        if (da !== db) return da - db;
+      }
+      if (city) {
+        var rank = function (s) {
+          if (activeLocationText(s).toLowerCase().includes(city)) return 0;
+          if (otherLocationText(s).toLowerCase().includes(city)) return 1;
+          return 2;
+        };
+        var ra = rank(a);
+        var rb = rank(b);
+        if (ra !== rb) return ra - rb;
+      }
+      return activeLocationText(a).localeCompare(activeLocationText(b), undefined, { sensitivity: "base" });
+    });
+
+    return filtered;
+  }
+
+  function modeCopy() {
+    if (mapMode === "coming") {
+      return {
+        help: "See who wants to move TO an area",
+        list: "Focused on where carriers want to go",
+        placeholder: "Search a city they want…",
+      };
+    }
+    return {
+      help: "See who is trying to leave an area",
+      list: "Focused on where carriers are leaving from",
+      placeholder: "Search a city they’re leaving…",
+    };
+  }
+
+  function syncModeControls() {
+    const coming = mapMode === "coming";
+    if (els.modeLeaving) {
+      els.modeLeaving.classList.toggle("is-active", !coming);
+      els.modeLeaving.setAttribute("aria-pressed", coming ? "false" : "true");
+    }
+    if (els.modeComing) {
+      els.modeComing.classList.toggle("is-active", coming);
+      els.modeComing.setAttribute("aria-pressed", coming ? "true" : "false");
+    }
+    const copy = modeCopy();
+    if (els.mapModeHelp) els.mapModeHelp.textContent = copy.help;
+    if (els.listModeNote) els.listModeNote.textContent = copy.list;
+    if (els.filterCity) els.filterCity.placeholder = copy.placeholder;
+    const explore = $("#explore");
+    if (explore) explore.classList.toggle("mode-coming", coming);
+    if (els.nearMeBtn) {
+      const on = !!nearMeCenter;
+      els.nearMeBtn.classList.toggle("is-active", on);
+      els.nearMeBtn.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+  }
+
+  function setMapMode(mode) {
+    if (mode !== "leaving" && mode !== "coming") return;
+    if (mode === mapMode) return;
+    mapMode = mode;
+    activeSwapId = null;
+    syncModeControls();
+    refreshViews();
+    if (nearMeCenter) zoomToMiles(nearMeCenter.lat, nearMeCenter.lng);
+    else forceMapRefresh(getFilteredSwaps());
   }
 
   // ---------- Map ----------
@@ -905,6 +1111,8 @@
     map = L.map("map", {
       zoomControl: true,
       scrollWheelZoom: true,
+      // markercluster refuses to start if the map has no finite max zoom
+      maxZoom: 18,
     }).setView([36.5, -105], 4);
 
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -912,18 +1120,55 @@
       maxZoom: 18,
     }).addTo(map);
 
-    markersLayer = L.layerGroup().addTo(map);
+    markersLayer = createMarkersLayer().addTo(map);
 
-    // Fix tiles when container becomes visible / resized
+    // Fix tiles when container becomes visible / resized.
+    // Resize only recalculates size — refitting here would undo Near Me on phones.
     setTimeout(function () {
       forceMapRefresh(getFilteredSwaps());
     }, 200);
     window.addEventListener("resize", function () {
-      if (map) {
-        map.invalidateSize();
-        forceMapRefresh(getFilteredSwaps());
-      }
+      if (map) map.invalidateSize();
     });
+  }
+
+  function createMarkersLayer() {
+    if (typeof L.markerClusterGroup === "function") {
+      return L.markerClusterGroup({
+        showCoverageOnHover: false,
+        spiderfyOnMaxZoom: true,
+        zoomToBoundsOnClick: true,
+        disableClusteringAtZoom: 12,
+        maxClusterRadius: function (zoom) {
+          if (zoom <= 5) return 64;
+          if (zoom <= 8) return 50;
+          return 36;
+        },
+        spiderfyDistanceMultiplier: 1.6,
+        spiderLegPolylineOptions: { weight: 1.5, color: "#003087", opacity: 0.75 },
+        chunkedLoading: true,
+        removeOutsideVisibleBounds: false,
+        iconCreateFunction: function (cluster) {
+          var count = cluster.getChildCount();
+          var sizeClass = "marker-cluster-small";
+          var iconSize = 40;
+          if (count >= 50) {
+            sizeClass = "marker-cluster-large";
+            iconSize = 52;
+          } else if (count >= 10) {
+            sizeClass = "marker-cluster-medium";
+            iconSize = 46;
+          }
+          return L.divIcon({
+            html: "<div><span>" + count + "</span></div>",
+            className: "marker-cluster " + sizeClass,
+            iconSize: L.point(iconSize, iconSize),
+          });
+        },
+      });
+    }
+    console.warn("[PostSwap] Leaflet.markercluster missing — pins will not group");
+    return L.layerGroup();
   }
 
   function createMarkerIcon(highlight) {
@@ -968,15 +1213,36 @@
     </button>`;
   }
 
+  function popupMaxWidth() {
+    if (!map) return 280;
+    var w = map.getSize().x || 320;
+    return Math.max(200, Math.min(300, w - 48));
+  }
+
   function popupHtml(s) {
+    const pin = activePin(s);
+    const headline =
+      mapMode === "coming"
+        ? "Coming to " + (s.desired || "an open location")
+        : "Leaving from " + (s.current || "an open location");
+    const weak = pin.quality !== "city";
+    const verified = s.privacyLabel || "Verified Carrier";
     return `
       <div class="popup-card">
-        <h4>${escapeHtml(s.current)} → ${escapeHtml(s.desired)}</h4>
+        <h4>${escapeHtml(headline)}</h4>
         <div class="popup-meta">
-          <div><strong>Craft:</strong> ${escapeHtml(s.craft)}</div>
+          <div><strong>Current location:</strong> ${escapeHtml(s.current || "Not listed")}</div>
+          <div><strong>Desired location:</strong> ${escapeHtml(s.desired || "Not listed")}</div>
+          <div><strong>Craft:</strong> ${escapeHtml(s.craft || "")}</div>
           <div><strong>Seniority:</strong> ${formatSeniority(s.seniority)}</div>
-          <div><strong>Type:</strong> ${escapeHtml(s.swapType)}</div>
+          ${s.swapType ? `<div><strong>Swap type:</strong> ${escapeHtml(s.swapType)}</div>` : ""}
+          <div><span class="popup-verified">${escapeHtml(verified)}</span></div>
         </div>
+        ${
+          weak
+            ? `<div class="popup-approx">Pin is approximate. City: ${escapeHtml(pin.label || s.current || s.desired || "Unknown")}</div>`
+            : ""
+        }
         ${s.notes ? `<div class="popup-note">“${escapeHtml(s.notes)}”</div>` : ""}
         <div class="popup-actions">
           <button type="button" class="btn btn-primary" data-dm-id="${s.id}">
@@ -1006,31 +1272,46 @@
     markersLayer.clearLayers();
     markerById.clear();
 
+    const placed = spreadPins(
+      filtered.map(function (s) {
+        var pin = activePin(s);
+        return { id: s.id, lat: pin.lat, lng: pin.lng };
+      })
+    );
+
     filtered.forEach((s) => {
-      const marker = L.marker([s.lat, s.lng], {
+      const spot = placed.get(String(s.id)) || activePin(s);
+      const marker = L.marker([spot.lat, spot.lng], {
         icon: createMarkerIcon(idEq(s.id, activeSwapId)),
         title: `${s.current} → ${s.desired}`,
       });
-      marker.bindPopup(popupHtml(s), { maxWidth: 300 });
+      marker.bindPopup(popupHtml(s), {
+        maxWidth: popupMaxWidth(),
+        minWidth: 200,
+        autoPan: true,
+        autoPanPadding: [28, 28],
+        keepInView: true,
+        className: "swap-popup",
+      });
       marker.on("click", () => {
         setActiveSwap(s.id, { fromMap: true });
       });
-      marker.on("popupopen", () => {
-        const root = document.querySelector(`.leaflet-popup-content`);
+      marker.on("popupopen", (e) => {
+        const root = e.popup && e.popup.getElement ? e.popup.getElement() : null;
         if (!root) return;
         const btn = root.querySelector(`[data-dm-id="${s.id}"]`);
         if (btn) {
-          btn.addEventListener("click", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
+          btn.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
             openDm(s);
           });
         }
         const shareBtn = root.querySelector(`[data-share-id="${s.id}"]`);
         if (shareBtn) {
-          shareBtn.addEventListener("click", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
+          shareBtn.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
             openShare(s);
           });
         }
@@ -1057,21 +1338,37 @@
     if (!fromMap) {
       const marker = markerById.get(id) || markerById.get(String(id));
       if (marker && map) {
-        map.panTo(marker.getLatLng(), { animate: true });
-        marker.openPopup();
+        const openIt = function () {
+          marker.openPopup();
+        };
+        if (markersLayer && typeof markersLayer.zoomToShowLayer === "function") {
+          markersLayer.zoomToShowLayer(marker, openIt);
+        } else {
+          map.panTo(marker.getLatLng(), { animate: true });
+          openIt();
+        }
       }
     }
   }
 
   // ---------- List ----------
   function renderList(filtered) {
-    els.listCount.textContent = `${filtered.length} open`;
+    els.listCount.textContent = nearMeCenter
+      ? `${filtered.length} near you`
+      : `${filtered.length} open`;
 
     if (!filtered.length) {
+      const craftLabel = els.filterCraft && els.filterCraft.value ? " in this craft" : "";
+      const emptyTitle = nearMeCenter ? "No swaps near you" : "No swaps match your filters";
+      const emptyBody = nearMeCenter
+        ? mapMode === "coming"
+          ? "Nobody" + craftLabel + " wants to move within about 150 miles. Try Leaving from, or search a city."
+          : "Nobody" + craftLabel + " is leaving from within about 150 miles. Try Coming to, or search a city."
+        : "Try another city or craft — or post yours so others can find you.";
       els.swapList.innerHTML = `
         <div class="empty-state">
-          <strong>No swaps match your filters</strong>
-          <p>Try another city or craft — or post yours so others can find you.</p>
+          <strong>${emptyTitle}</strong>
+          <p>${emptyBody}</p>
         </div>
       `;
       return;
@@ -1084,10 +1381,17 @@
         <article class="swap-card${idEq(s.id, activeSwapId) ? " active" : ""}${isMine ? " mine" : ""}${s.justAdded ? " just-added" : ""}" data-id="${s.id}" tabindex="0">
           <div class="swap-card-top">
             <div class="swap-route">
-              ${escapeHtml(s.current)} <span class="arrow">→</span> ${escapeHtml(s.desired)}
+              <span class="${mapMode === "leaving" ? "loc-focus" : ""}">${escapeHtml(s.current)}</span>
+              <span class="arrow">→</span>
+              <span class="${mapMode === "coming" ? "loc-focus" : ""}">${escapeHtml(s.desired)}</span>
             </div>
             <span class="swap-badge ${badgeClass(s.swapType)}">${escapeHtml(s.swapType)}</span>
           </div>
+          <div class="swap-focus">${
+            mapMode === "coming"
+              ? "Coming to " + escapeHtml(s.desired || "an open location")
+              : "Leaving from " + escapeHtml(s.current || "an open location")
+          }</div>
           <div class="swap-meta">
             <span>${escapeHtml(s.craft)}</span>
             <span>${formatSeniority(s.seniority)} seniority</span>
@@ -1122,6 +1426,7 @@
   }
 
   function refreshViews() {
+    syncModeControls();
     const filtered = getFilteredSwaps();
     renderList(filtered);
     refreshMap(filtered);
@@ -1136,14 +1441,63 @@
   }
 
   // ---------- Near Me ----------
-  function nearMe() {
-    // Demo: center on Southwest (Las Vegas / Phoenix corridor)
-    if (map) {
-      map.flyTo([35.5, -113.5], 6, { duration: 1.2 });
+  /** Fit the map to about a 150-mile radius. Not street level, not the whole country. */
+  function zoomToMiles(lat, lng) {
+    if (!map || !isFinite(lat) || !isFinite(lng)) return;
+    var diameterMeters = NEAR_ME_MILES * 1609.344 * 2;
+    var bounds = L.latLng(lat, lng).toBounds(diameterMeters);
+    map.fitBounds(bounds, { padding: [28, 28], animate: true, maxZoom: 8 });
+  }
+
+  function clearNearMe(silent) {
+    nearMeCenter = null;
+    syncModeControls();
+    refreshViews();
+    forceMapRefresh(getFilteredSwaps());
+    if (!silent) {
+      showToast("Near Me off", "Showing swaps across the country again.");
     }
-    els.filterCity.value = "";
-    // Soft highlight of SW swaps by not filtering city; toast instead
-    showToast("Near Me", "Centered on the Southwest — Las Vegas & Phoenix corridor.");
+  }
+
+  function nearMe() {
+    if (nearMeCenter) {
+      clearNearMe(false);
+      return;
+    }
+    if (!navigator.geolocation) {
+      showToast("Location unavailable", "Search a city instead — this browser can’t share location.");
+      return;
+    }
+    if (els.nearMeBtn) els.nearMeBtn.disabled = true;
+    navigator.geolocation.getCurrentPosition(
+      function (pos) {
+        if (els.nearMeBtn) els.nearMeBtn.disabled = false;
+        nearMeCenter = {
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+        };
+        if (els.filterCity) els.filterCity.value = "";
+        syncModeControls();
+        refreshViews();
+        zoomToMiles(nearMeCenter.lat, nearMeCenter.lng);
+        var count = getFilteredSwaps().length;
+        var where =
+          mapMode === "coming"
+            ? "want to move near you"
+            : "are leaving from near you";
+        showToast(
+          "Near Me",
+          count
+            ? count + " " + where + " (about 150 miles)."
+            : "No one " + where + " within about 150 miles."
+        );
+      },
+      function () {
+        if (els.nearMeBtn) els.nearMeBtn.disabled = false;
+        showToast("Location blocked", "Allow location to use Near Me, or search a city instead.");
+      },
+      { enableHighAccuracy: false, timeout: 10000, maximumAge: 120000 }
+    );
   }
 
   // ---------- Modals ----------
@@ -2040,6 +2394,7 @@
       newSwap = { ...draft, id: "local-" + Date.now() };
     }
 
+    newSwap = withPinCoords(newSwap);
     swaps.unshift(newSwap);
     setButtonLoading(submitBtn, false);
     closeAllModals();
@@ -2049,12 +2404,14 @@
 
     els.filterCity.value = "";
     els.filterCraft.value = "";
+    nearMeCenter = null;
     refreshViews();
     activeSwapId = newSwap.id;
     setActiveSwap(newSwap.id);
 
     if (map) {
-      map.flyTo([newSwap.lat, newSwap.lng], 10, { duration: 1 });
+      var postedPin = activePin(newSwap);
+      map.flyTo([postedPin.lat, postedPin.lng], 8, { duration: 1 });
     }
 
     console.log("[PostSwap] handlePost: done", {
@@ -2350,13 +2707,29 @@
     // Filters
     els.filterCity.addEventListener("input", () => {
       activeSwapId = null;
+      // A city search replaces Near Me so the two don't fight.
+      var hadNear = !!nearMeCenter;
+      if ((els.filterCity.value || "").trim() && nearMeCenter) {
+        nearMeCenter = null;
+      }
       refreshViews();
+      if (hadNear && !nearMeCenter) forceMapRefresh(getFilteredSwaps());
     });
     els.filterCraft.addEventListener("change", () => {
       activeSwapId = null;
       refreshViews();
     });
     els.nearMeBtn.addEventListener("click", nearMe);
+    if (els.modeLeaving) {
+      els.modeLeaving.addEventListener("click", function () {
+        setMapMode("leaving");
+      });
+    }
+    if (els.modeComing) {
+      els.modeComing.addEventListener("click", function () {
+        setMapMode("coming");
+      });
+    }
 
     // Forms
     els.formPost.addEventListener("submit", handlePost);

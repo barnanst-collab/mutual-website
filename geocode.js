@@ -418,6 +418,502 @@
     return withQuality(usSpreadFallback(h), "approx");
   }
 
+  /**
+   * Home state for city names that are stored without a ", ST" suffix.
+   * Names that differ by state stay on the key itself (for example "portland, or").
+   */
+  const CITY_HOME = {
+    "north las vegas": "NV",
+    "las vegas": "NV",
+    henderson: "NV",
+    reno: "NV",
+    sparks: "NV",
+    phoenix: "AZ",
+    mesa: "AZ",
+    scottsdale: "AZ",
+    chandler: "AZ",
+    gilbert: "AZ",
+    tucson: "AZ",
+    flagstaff: "AZ",
+    yuma: "AZ",
+    albuquerque: "NM",
+    "santa fe": "NM",
+    "las cruces": "NM",
+    denver: "CO",
+    "colorado springs": "CO",
+    "fort collins": "CO",
+    boulder: "CO",
+    "salt lake city": "UT",
+    "salt lake": "UT",
+    "west valley city": "UT",
+    provo: "UT",
+    ogden: "UT",
+    boise: "ID",
+    billings: "MT",
+    cheyenne: "WY",
+    "los angeles": "CA",
+    "long beach": "CA",
+    anaheim: "CA",
+    "santa ana": "CA",
+    riverside: "CA",
+    "san bernardino": "CA",
+    bakersfield: "CA",
+    fresno: "CA",
+    sacramento: "CA",
+    oakland: "CA",
+    "san francisco": "CA",
+    "san jose": "CA",
+    "san diego": "CA",
+    stockton: "CA",
+    modesto: "CA",
+    irvine: "CA",
+    "chula vista": "CA",
+    seattle: "WA",
+    tacoma: "WA",
+    spokane: "WA",
+    bellevue: "WA",
+    eugene: "OR",
+    honolulu: "HI",
+    anchorage: "AK",
+    dallas: "TX",
+    "fort worth": "TX",
+    plano: "TX",
+    houston: "TX",
+    "san antonio": "TX",
+    austin: "TX",
+    "el paso": "TX",
+    "corpus christi": "TX",
+    lubbock: "TX",
+    amarillo: "TX",
+    "oklahoma city": "OK",
+    tulsa: "OK",
+    "little rock": "AR",
+    "new orleans": "LA",
+    "baton rouge": "LA",
+    shreveport: "LA",
+    chicago: "IL",
+    naperville: "IL",
+    rockford: "IL",
+    milwaukee: "WI",
+    madison: "WI",
+    "green bay": "WI",
+    minneapolis: "MN",
+    "saint paul": "MN",
+    "st paul": "MN",
+    "des moines": "IA",
+    "cedar rapids": "IA",
+    "iowa city": "IA",
+    "kansas city": "MO",
+    "st louis": "MO",
+    "saint louis": "MO",
+    omaha: "NE",
+    lincoln: "NE",
+    wichita: "KS",
+    "overland park": "KS",
+    indianapolis: "IN",
+    "fort wayne": "IN",
+    cleveland: "OH",
+    cincinnati: "OH",
+    toledo: "OH",
+    akron: "OH",
+    dayton: "OH",
+    youngstown: "OH",
+    detroit: "MI",
+    "grand rapids": "MI",
+    "ann arbor": "MI",
+    louisville: "KY",
+    lexington: "KY",
+    "new york": "NY",
+    "new york city": "NY",
+    nyc: "NY",
+    brooklyn: "NY",
+    queens: "NY",
+    bronx: "NY",
+    "staten island": "NY",
+    buffalo: "NY",
+    rochester: "NY",
+    albany: "NY",
+    syracuse: "NY",
+    "white plains": "NY",
+    yonkers: "NY",
+    "new rochelle": "NY",
+    "jersey city": "NJ",
+    newark: "NJ",
+    paterson: "NJ",
+    trenton: "NJ",
+    camden: "NJ",
+    philadelphia: "PA",
+    pittsburgh: "PA",
+    allentown: "PA",
+    erie: "PA",
+    harrisburg: "PA",
+    scranton: "PA",
+    boston: "MA",
+    worcester: "MA",
+    springfield: "MA",
+    providence: "RI",
+    hartford: "CT",
+    "new haven": "CT",
+    bridgeport: "CT",
+    portland: "ME",
+    burlington: "VT",
+    baltimore: "MD",
+    washington: "DC",
+    "virginia beach": "VA",
+    norfolk: "VA",
+    richmond: "VA",
+    charlotte: "NC",
+    raleigh: "NC",
+    durham: "NC",
+    greensboro: "NC",
+    "winston salem": "NC",
+    columbia: "SC",
+    greenville: "SC",
+    atlanta: "GA",
+    savannah: "GA",
+    augusta: "GA",
+    jacksonville: "FL",
+    miami: "FL",
+    tampa: "FL",
+    orlando: "FL",
+    "st petersburg": "FL",
+    "fort lauderdale": "FL",
+    tallahassee: "FL",
+    birmingham: "AL",
+    mobile: "AL",
+    huntsville: "AL",
+    memphis: "TN",
+    nashville: "TN",
+    knoxville: "TN",
+    chattanooga: "TN",
+    gulfport: "MS",
+    "sioux falls": "SD",
+    "rapid city": "SD",
+    fargo: "ND",
+    wilmington: "DE",
+  };
+
+  const CITY_DISPLAY = {
+    nyc: "New York",
+    "new york city": "New York",
+    "st petersburg": "St. Petersburg",
+    "st louis": "St. Louis",
+    "st paul": "St. Paul",
+    "saint louis": "St. Louis",
+    "saint paul": "St. Paul",
+    "winston salem": "Winston-Salem",
+  };
+
+  let CITY_INDEX = null;
+
+  function normalizeCity(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/\./g, "")
+      .replace(/['’]/g, "")
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function normalizeState(value) {
+    var raw = String(value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\./g, "")
+      .replace(/\s+/g, " ");
+    if (!raw) return null;
+    if (
+      raw === "dc" ||
+      raw === "d c" ||
+      raw === "district of columbia" ||
+      raw === "washington dc" ||
+      raw === "washington d c"
+    ) {
+      return "DC";
+    }
+    if (/^[a-z]{2}$/.test(raw)) {
+      var up = raw.toUpperCase();
+      return STATE_COORDS[up] ? up : null;
+    }
+    return STATE_NAMES[raw] || null;
+  }
+
+  function titleCity(name) {
+    var key = normalizeCity(name);
+    if (CITY_DISPLAY[key]) return CITY_DISPLAY[key];
+    return key.replace(/\b[a-z0-9]/g, function (ch) {
+      return ch.toUpperCase();
+    });
+  }
+
+  function cityIndex() {
+    if (CITY_INDEX) return CITY_INDEX;
+    var rows = [];
+    Object.keys(CITY_COORDS).forEach(function (key) {
+      var lower = String(key).toLowerCase();
+      var name = "";
+      var state = null;
+      var comma = lower.match(/^(.*),\s*([a-z]{2})$/);
+      var trail = lower.match(/^(.*)\s+([a-z]{2})$/);
+      if (comma && STATE_COORDS[comma[2].toUpperCase()]) {
+        name = normalizeCity(comma[1]);
+        state = comma[2].toUpperCase();
+      } else if (trail && STATE_COORDS[trail[2].toUpperCase()] && normalizeCity(trail[1])) {
+        name = normalizeCity(trail[1]);
+        state = trail[2].toUpperCase();
+      } else {
+        name = normalizeCity(key);
+        state = CITY_HOME[name] || null;
+      }
+      rows.push({
+        key: key,
+        name: name,
+        state: state,
+        lat: CITY_COORDS[key][0],
+        lng: CITY_COORDS[key][1],
+      });
+    });
+    CITY_INDEX = rows;
+    return rows;
+  }
+
+  function missingCityStates() {
+    return cityIndex()
+      .filter(function (row) {
+        return !row.state;
+      })
+      .map(function (row) {
+        return row.key;
+      });
+  }
+
+  /** Exact city + state. No substring match and no state-center fallback. */
+  function lookupCity(city, state) {
+    var name = normalizeCity(city);
+    var st = normalizeState(state);
+    if (!name || !st) return null;
+    var rows = cityIndex().filter(function (row) {
+      return row.name === name && row.state === st;
+    });
+    if (!rows.length) return null;
+    var row = rows[0];
+    var display = titleCity(row.name);
+    return {
+      city: display,
+      state: st,
+      lat: row.lat,
+      lng: row.lng,
+      quality: "city",
+      label: display + ", " + st,
+    };
+  }
+
+  function suggestCities(query, state, limit) {
+    var st = normalizeState(state);
+    if (!st) return [];
+    var q = normalizeCity(query);
+    if (!q) return [];
+    var cap = limit == null ? 8 : limit;
+    var seen = {};
+    var out = [];
+    cityIndex().forEach(function (row) {
+      if (!row.name || row.name.indexOf(q) === -1) return;
+      var hit = lookupCity(row.name, st);
+      if (!hit) return;
+      var id = hit.city + "|" + hit.state;
+      if (seen[id]) return;
+      seen[id] = 1;
+      out.push(hit);
+    });
+    out.sort(function (a, b) {
+      var an = normalizeCity(a.city);
+      var bn = normalizeCity(b.city);
+      var ap = an.indexOf(q) === 0 ? 0 : 1;
+      var bp = bn.indexOf(q) === 0 ? 0 : 1;
+      if (ap !== bp) return ap - bp;
+      return a.city.localeCompare(b.city);
+    });
+    return out.slice(0, cap);
+  }
+
+  function haversineMiles(lat1, lng1, lat2, lng2) {
+    var toRad = function (d) {
+      return (d * Math.PI) / 180;
+    };
+    var dLat = toRad(lat2 - lat1);
+    var dLng = toRad(lng2 - lng1);
+    var a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    return 3958.8 * 2 * Math.asin(Math.min(1, Math.sqrt(a)));
+  }
+
+  /** Closest listed city within maxMiles. Returns null when nothing is close enough. */
+  function nearestCity(lat, lng, maxMiles) {
+    var max = maxMiles == null ? 40 : maxMiles;
+    var best = null;
+    var bestD = max;
+    cityIndex().forEach(function (row) {
+      if (!row.state) return;
+      var d = haversineMiles(lat, lng, row.lat, row.lng);
+      if (d < bestD || (best && d === bestD && row.state && String(row.key).indexOf(",") !== -1)) {
+        best = row;
+        bestD = d;
+      }
+    });
+    if (!best) return null;
+    var hit = lookupCity(best.name, best.state);
+    if (!hit) return null;
+    hit.miles = bestD;
+    return hit;
+  }
+
+  function stateOptions() {
+    return Object.keys(STATE_COORDS).sort();
+  }
+
+  function stateCentroid(state) {
+    var st = normalizeState(state);
+    if (!st || !STATE_COORDS[st]) return null;
+    return {
+      state: st,
+      lat: STATE_COORDS[st][0],
+      lng: STATE_COORDS[st][1],
+      quality: "region",
+      label: "Anywhere in " + st,
+    };
+  }
+
+  function splitCityState(body) {
+    var text = String(body || "").trim();
+    if (!text) return null;
+    var comma = text.match(/^(.*),\s*(.+)$/);
+    if (comma) {
+      var commaState = normalizeState(comma[2]);
+      if (commaState && comma[1].trim()) return { city: comma[1].trim(), state: commaState };
+    }
+    var lower = text.toLowerCase().replace(/\./g, "").replace(/\s+/g, " ").trim();
+    var names = Object.keys(STATE_NAMES).sort(function (a, b) {
+      return b.length - a.length;
+    });
+    for (var i = 0; i < names.length; i++) {
+      var name = names[i];
+      if (lower === name) return null;
+      if (lower.endsWith(" " + name)) {
+        var pre = text.slice(0, text.length - name.length).replace(/[\s,]+$/, "");
+        if (pre) return { city: pre, state: STATE_NAMES[name] };
+      }
+    }
+    var abbr = text.match(/^(.*?)[\s,]+([A-Za-z]{2})\.?$/);
+    if (abbr) {
+      var abbrState = normalizeState(abbr[2]);
+      if (abbrState && abbr[1].trim()) return { city: abbr[1].trim(), state: abbrState };
+    }
+    return null;
+  }
+
+  /**
+   * Read a saved location string. ok is true only for a listed city or an explicit
+   * Anywhere / Anywhere-in-a-state phrase. Zip-only text is returned for a later lookup.
+   */
+  function parseLocation(input) {
+    var raw = String(input || "").replace(/\s+/g, " ").trim();
+    if (!raw) {
+      return { ok: false, kind: "empty", reason: "empty", city: "", state: "", zip: "", label: "" };
+    }
+    var lower = raw.toLowerCase().replace(/\./g, "").replace(/\s+/g, " ").trim();
+    if (
+      /^(anywhere|any where|nationwide|nationwide us|us wide|u s wide|open to anywhere|flexible|any city|any state)$/.test(
+        lower
+      )
+    ) {
+      return {
+        ok: true,
+        kind: "anywhere",
+        city: "",
+        state: "",
+        zip: "",
+        label: "Anywhere",
+        lat: null,
+        lng: null,
+        quality: "anywhere",
+      };
+    }
+    var region = lower.match(/^(?:anywhere|any where|any city)\s+in\s+(?:the\s+state\s+of\s+)?(.+)$/);
+    if (region) {
+      var regionState = normalizeState(region[1]);
+      if (!regionState || !STATE_COORDS[regionState]) {
+        return {
+          ok: false,
+          kind: "region",
+          reason: "region-not-a-state",
+          city: "",
+          state: "",
+          zip: "",
+          label: raw,
+        };
+      }
+      return {
+        ok: true,
+        kind: "region",
+        city: "",
+        state: regionState,
+        zip: "",
+        label: "Anywhere in " + regionState,
+        lat: STATE_COORDS[regionState][0],
+        lng: STATE_COORDS[regionState][1],
+        quality: "region",
+      };
+    }
+    var zipOnly = lower.match(/^(?:zip\s*)?(\d{5})(?:-\d{4})?$/);
+    if (zipOnly) {
+      return {
+        ok: false,
+        kind: "zip",
+        reason: "zip-only",
+        city: "",
+        state: "",
+        zip: zipOnly[1],
+        label: raw,
+      };
+    }
+    var zip = "";
+    var body = raw;
+    var zipMatch = body.match(/^(.*?)(?:\s+|,\s*)(\d{5})(?:-\d{4})?$/);
+    if (zipMatch && zipMatch[1].trim()) {
+      zip = zipMatch[2];
+      body = zipMatch[1].trim().replace(/[,\s]+$/, "");
+    }
+    var parts = splitCityState(body);
+    if (!parts) {
+      return { ok: false, kind: "unparsed", reason: "unparsed", city: "", state: "", zip: zip, label: raw };
+    }
+    var hit = lookupCity(parts.city, parts.state);
+    if (!hit) {
+      return {
+        ok: false,
+        kind: "unknown-city",
+        reason: "unknown-city",
+        city: titleCity(parts.city),
+        state: parts.state,
+        zip: zip,
+        label: raw,
+      };
+    }
+    return {
+      ok: true,
+      kind: "city",
+      city: hit.city,
+      state: hit.state,
+      zip: zip,
+      label: hit.label,
+      lat: hit.lat,
+      lng: hit.lng,
+      quality: "city",
+    };
+  }
+
   function regionFromLocation(loc) {
     var l = String(loc || "").toLowerCase();
     var st = extractStateAbbr(l);
@@ -486,6 +982,14 @@
     regionFromLocation: regionFromLocation,
     CITY_COORDS: CITY_COORDS,
     STATE_COORDS: STATE_COORDS,
+    lookupCity: lookupCity,
+    suggestCities: suggestCities,
+    nearestCity: nearestCity,
+    parseLocation: parseLocation,
+    normalizeState: normalizeState,
+    stateOptions: stateOptions,
+    stateCentroid: stateCentroid,
+    missingCityStates: missingCityStates,
   };
 
   global.PostSwapGeocode = api;

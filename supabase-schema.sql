@@ -14,6 +14,18 @@ alter table public.swaps drop constraint if exists swaps_status_check;
 alter table public.swaps
   add constraint swaps_status_check
   check (status in ('open', 'closed', 'archived'));
+
+-- Structured locations. Does not enable row level security and does not delete rows.
+-- Run this block on its own. Do not re-run the whole file (the bottom enables message RLS).
+alter table public.swaps add column if not exists current_city text;
+alter table public.swaps add column if not exists current_state text;
+alter table public.swaps add column if not exists current_zip text;
+alter table public.swaps add column if not exists desired_city text;
+alter table public.swaps add column if not exists desired_state text;
+alter table public.swaps add column if not exists desired_zip text;
+alter table public.swaps add column if not exists lat double precision;
+alter table public.swaps add column if not exists lng double precision;
+
 -- Messages RLS is enabled at the bottom of this file.
 -- A user may read a row only when from_user or to_user is one of their identity keys.
 

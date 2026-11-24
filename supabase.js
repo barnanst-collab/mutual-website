@@ -10,7 +10,7 @@
 (function (global) {
   "use strict";
 
-  const BUILD = "2026-11-23name";
+  const BUILD = "2026-11-24loc";
   const SUPABASE_URL = "https://olfystbcngdcevtndkdq.supabase.co";
   const SUPABASE_ANON_KEY =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9sZnlzdGJjbmdkY2V2dG5ka2RxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM2MzE5NTMsImV4cCI6MjA5OTIwNzk1M30.Kr47X97Wrpppt2Vs-XhOzYMsQD8PmAPwbuWEyG8xEAk";
@@ -176,23 +176,104 @@
     return "United States";
   }
 
+  function blankToNull(value) {
+    if (value == null) return null;
+    const text = String(value).trim();
+    return text ? text : null;
+  }
+
+  function lookupStoredCity(city, state) {
+    if (
+      !city ||
+      !state ||
+      !global.PostSwapGeocode ||
+      typeof global.PostSwapGeocode.lookupCity !== "function"
+    ) {
+      return null;
+    }
+    return global.PostSwapGeocode.lookupCity(city, state);
+  }
+
   /** Map DB row → app swap shape */
   function mapSwapFromDb(row) {
     if (!row) return null;
     const current = row.current_location || "";
-    const coords = geocode(current, row.id != null ? row.id : current);
+    const desired = row.desired_location || "";
+    const currentCity = row.current_city || "";
+    const currentState = row.current_state || "";
+    const desiredCity = row.desired_city || "";
+    const desiredState = row.desired_state || "";
+    const hit = lookupStoredCity(currentCity, currentState);
+    let lat;
+    let lng;
+    let currentQuality;
+    if (hit) {
+      lat = hit.lat;
+      lng = hit.lng;
+      currentQuality = "city";
+    } else if (row.lat != null && row.lng != null && currentCity && currentState) {
+      lat = Number(row.lat);
+      lng = Number(row.lng);
+      currentQuality = "city";
+    } else {
+      const coords = geocode(current, row.id != null ? row.id : current);
+      lat = coords.lat;
+      lng = coords.lng;
+      currentQuality = coords.quality || "approx";
+    }
+    let desiredMode = "";
+    let desiredQuality = "";
+    let desiredLat = null;
+    let desiredLng = null;
+    const desiredHit = lookupStoredCity(desiredCity, desiredState);
+    if (desiredHit) {
+      desiredMode = "city";
+      desiredQuality = "city";
+      desiredLat = desiredHit.lat;
+      desiredLng = desiredHit.lng;
+    } else if (
+      global.PostSwapGeocode &&
+      typeof global.PostSwapGeocode.parseLocation === "function"
+    ) {
+      const parsed = global.PostSwapGeocode.parseLocation(desired);
+      if (parsed && parsed.ok && parsed.kind === "city") {
+        desiredMode = "city";
+        desiredQuality = "city";
+        desiredLat = parsed.lat;
+        desiredLng = parsed.lng;
+      } else if (parsed && parsed.ok && parsed.kind === "region") {
+        desiredMode = "region";
+        desiredQuality = "region";
+        desiredLat = parsed.lat;
+        desiredLng = parsed.lng;
+      } else if (parsed && parsed.ok && parsed.kind === "anywhere") {
+        desiredMode = "anywhere";
+        desiredQuality = "anywhere";
+      }
+    }
     const region = regionFromLocation(current);
     const username = row.username || null;
     return {
       id: row.id,
       current,
-      desired: row.desired_location || "",
+      desired,
       craft: row.craft || "Letter Carrier",
       seniority: Number(row.seniority) || 0,
       swapType: row.swap_type || "Permanent",
       notes: row.notes || "",
-      lat: coords.lat,
-      lng: coords.lng,
+      lat,
+      lng,
+      currentQuality,
+      currentCity,
+      currentState,
+      currentZip: row.current_zip || "",
+      desiredCity,
+      desiredState,
+      desiredZip: row.desired_zip || "",
+      desiredMode,
+      desiredQuality,
+      desiredLat,
+      desiredLng,
       region,
       privacyLabel: username
         ? `Verified Carrier • ${username}`
@@ -208,12 +289,50 @@
     return {
       current_location: swap.current,
       desired_location: swap.desired,
+      current_city: blankToNull(swap.currentCity),
+      current_state: blankToNull(swap.currentState),
+      current_zip: blankToNull(swap.currentZip),
+      desired_city: blankToNull(swap.desiredCity),
+      desired_state: blankToNull(swap.desiredState),
+      desired_zip: blankToNull(swap.desiredZip),
+      lat: swap.lat == null ? null : Number(swap.lat),
+      lng: swap.lng == null ? null : Number(swap.lng),
       craft: swap.craft,
       seniority: swap.seniority,
       notes: swap.notes || "",
       user_id: swap.ownerId || null,
       username: swap.username || null,
     };
+  }
+
+  const LOCATION_COLUMNS = [
+    "current_city",
+    "current_state",
+    "current_zip",
+    "desired_city",
+    "desired_state",
+    "desired_zip",
+    "lat",
+    "lng",
+  ];
+
+  function locationColumnError(err) {
+    const msg = String((err && err.message) || "");
+    return !!(
+      err &&
+      err.status === 400 &&
+      /current_city|current_state|current_zip|desired_city|desired_state|desired_zip|'lat'|'lng'|"lat"|"lng"|schema cache/i.test(
+        msg
+      )
+    );
+  }
+
+  function withoutLocationColumns(body) {
+    const copy = Object.assign({}, body);
+    LOCATION_COLUMNS.forEach(function (key) {
+      delete copy[key];
+    });
+    return copy;
   }
 
   function mapProfileFromDb(row) {
@@ -275,32 +394,62 @@
     }
   }
 
+  function finishMappedSwap(row, swap) {
+    const mapped = mapSwapFromDb(row);
+    if (!mapped || !swap) return mapped;
+    if (swap.lat != null && swap.lng != null) {
+      mapped.lat = Number(swap.lat);
+      mapped.lng = Number(swap.lng);
+      mapped.currentQuality = swap.currentQuality || mapped.currentQuality || "city";
+    }
+    ["currentCity", "currentState", "currentZip", "desiredCity", "desiredState", "desiredZip", "desiredMode", "desiredQuality"].forEach(
+      function (key) {
+        if (swap[key] != null && swap[key] !== "") mapped[key] = swap[key];
+      }
+    );
+    if (swap.desiredCity === null) mapped.desiredCity = "";
+    if (swap.desiredState === null) mapped.desiredState = "";
+    if (swap.desiredZip === null) mapped.desiredZip = "";
+    if (swap.desiredLat !== undefined) mapped.desiredLat = swap.desiredLat;
+    if (swap.desiredLng !== undefined) mapped.desiredLng = swap.desiredLng;
+    if (swap.swapType) mapped.swapType = swap.swapType;
+    if (swap.region) mapped.region = swap.region;
+    if (swap.privacyLabel) mapped.privacyLabel = swap.privacyLabel;
+    if (swap.locationColumnsMissing) mapped.locationColumnsMissing = true;
+    return mapped;
+  }
+
+  async function insertSwapBody(body, swap) {
+    const rows = await request("/swaps", {
+      method: "POST",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify(body),
+    });
+    const row = Array.isArray(rows) ? rows[0] : rows;
+    if (!row) {
+      console.error("[PostSwapDB] createSwap: empty response row", rows);
+      throw new Error("Supabase returned no swap row after INSERT");
+    }
+    return finishMappedSwap(row, swap);
+  }
+
   async function createSwap(swap) {
     const body = mapSwapToDb(swap);
     console.log("[PostSwapDB] createSwap payload →", body);
     try {
-      const rows = await request("/swaps", {
-        method: "POST",
-        headers: { Prefer: "return=representation" },
-        body: JSON.stringify(body),
-      });
-      const row = Array.isArray(rows) ? rows[0] : rows;
-      if (!row) {
-        console.error("[PostSwapDB] createSwap: empty response row", rows);
-        throw new Error("Supabase returned no swap row after INSERT");
-      }
-      // Prefer server id + preserve client lat if we already computed it
-      const mapped = mapSwapFromDb(row);
-      if (swap.lat != null && swap.lng != null) {
-        mapped.lat = swap.lat;
-        mapped.lng = swap.lng;
-      }
-      if (swap.swapType) mapped.swapType = swap.swapType;
-      if (swap.region) mapped.region = swap.region;
-      if (swap.privacyLabel) mapped.privacyLabel = swap.privacyLabel;
+      const mapped = await insertSwapBody(body, swap);
       console.log("[PostSwapDB] createSwap success →", mapped);
       return mapped;
     } catch (err) {
+      if (locationColumnError(err)) {
+        console.warn("[PostSwapDB] location columns missing — saving City, ST text only");
+        const mapped = await insertSwapBody(
+          withoutLocationColumns(body),
+          Object.assign({}, swap, { locationColumnsMissing: true })
+        );
+        console.log("[PostSwapDB] createSwap success without location columns →", mapped);
+        return mapped;
+      }
       console.error("[PostSwapDB] createSwap FAILED", {
         message: err && err.message,
         status: err && err.status,
@@ -347,6 +496,14 @@
     const src = patch || {};
     if (src.current != null) body.current_location = src.current;
     if (src.desired != null) body.desired_location = src.desired;
+    if (src.currentCity !== undefined) body.current_city = blankToNull(src.currentCity);
+    if (src.currentState !== undefined) body.current_state = blankToNull(src.currentState);
+    if (src.currentZip !== undefined) body.current_zip = blankToNull(src.currentZip);
+    if (src.desiredCity !== undefined) body.desired_city = blankToNull(src.desiredCity);
+    if (src.desiredState !== undefined) body.desired_state = blankToNull(src.desiredState);
+    if (src.desiredZip !== undefined) body.desired_zip = blankToNull(src.desiredZip);
+    if (src.lat !== undefined) body.lat = src.lat == null ? null : Number(src.lat);
+    if (src.lng !== undefined) body.lng = src.lng == null ? null : Number(src.lng);
     if (src.craft != null) body.craft = src.craft;
     if (src.seniority != null) body.seniority = src.seniority;
     if (src.notes != null) body.notes = src.notes;
@@ -360,6 +517,20 @@
     }
     if (!Object.keys(body).length) throw new Error("Nothing to update.");
     console.log("[PostSwapDB] updateSwap", swapId, body);
+    try {
+      return await patchOwnedSwap(swapId, ownerId, body, src);
+    } catch (err) {
+      if (!locationColumnError(err)) throw err;
+      const slim = withoutLocationColumns(body);
+      if (!Object.keys(slim).length) throw err;
+      console.warn("[PostSwapDB] location columns missing — updating City, ST text only");
+      const mapped = await patchOwnedSwap(swapId, ownerId, slim, src);
+      mapped.locationColumnsMissing = true;
+      return mapped;
+    }
+  }
+
+  async function patchOwnedSwap(swapId, ownerId, body, src) {
     const rows = await request(swapOwnedPath(swapId, ownerId), {
       method: "PATCH",
       headers: { Prefer: "return=representation" },
@@ -367,9 +538,7 @@
     });
     const row = Array.isArray(rows) ? rows[0] : rows;
     if (!row) throw new Error("That swap wasn’t updated. Only the owner can change it.");
-    const mapped = mapSwapFromDb(row);
-    if (src.swapType) mapped.swapType = src.swapType;
-    return mapped;
+    return finishMappedSwap(row, src);
   }
 
   /**

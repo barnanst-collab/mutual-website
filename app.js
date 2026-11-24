@@ -83,7 +83,7 @@
       }
       const remote = await db().fetchSwaps();
       swaps = Array.isArray(remote) ? remote : [];
-      // Re-geocode on client so pins use latest city/state logic even if DB has no lat/lng
+      // Known cities use their real coordinates. Older free-text rows keep a fallback pin.
       swaps = swaps.map(withPinCoords);
       swapsLoaded = true;
       refreshViews();
@@ -256,10 +256,82 @@
     };
   }
 
-  /** Attach current + desired coordinates. Never stacks unknowns on one default point. */
+  function finiteCoord(n) {
+    return typeof n === "number" && isFinite(n);
+  }
+
+  function explicitDesiredMode(s) {
+    if (!s) return "";
+    if (s.desiredMode === "anywhere" || s.desiredMode === "region" || s.desiredMode === "city") {
+      return s.desiredMode;
+    }
+    var label = String(s.desired || "").trim();
+    if (/^anywhere$/i.test(label)) return "anywhere";
+    if (/^anywhere in [a-z]{2}$/i.test(label)) return "region";
+    return "";
+  }
+
+  /**
+   * City + state uses the listed coordinate. Explicit Anywhere / region does not invent a city.
+   * Older free-text rows still get a fallback pin so they stay on the map.
+   */
+  function pinFromFields(city, state, text, seed, side, swap) {
+    var g = window.PostSwapGeocode;
+    var mode = side === "desired" ? explicitDesiredMode(swap) : "";
+    if (mode === "anywhere") return { lat: null, lng: null, quality: "anywhere" };
+    if (mode === "region") {
+      var regionState = (swap && swap.desiredState) || String(text || "").replace(/^anywhere in\s+/i, "");
+      var centroid = g && g.stateCentroid ? g.stateCentroid(regionState) : null;
+      if (centroid) return { lat: centroid.lat, lng: centroid.lng, quality: "region" };
+    }
+    if (g && city && state && typeof g.lookupCity === "function") {
+      var hit = g.lookupCity(city, state);
+      if (hit) return { lat: hit.lat, lng: hit.lng, quality: "city" };
+    }
+    if (g && text && typeof g.parseLocation === "function") {
+      var parsed = g.parseLocation(text);
+      if (parsed && parsed.ok && parsed.kind === "city") {
+        return { lat: parsed.lat, lng: parsed.lng, quality: "city" };
+      }
+      if (side === "desired" && parsed && parsed.ok && parsed.kind === "anywhere") {
+        return { lat: null, lng: null, quality: "anywhere" };
+      }
+      if (side === "desired" && parsed && parsed.ok && parsed.kind === "region") {
+        return { lat: parsed.lat, lng: parsed.lng, quality: "region" };
+      }
+    }
+    if (
+      side === "current" &&
+      swap &&
+      swap.currentCity &&
+      swap.currentState &&
+      finiteCoord(Number(swap.lat)) &&
+      finiteCoord(Number(swap.lng))
+    ) {
+      return { lat: Number(swap.lat), lng: Number(swap.lng), quality: "city" };
+    }
+    var legacy = geocodeCurrent(text, seed);
+    return { lat: legacy.lat, lng: legacy.lng, quality: legacy.quality || "approx" };
+  }
+
+  /** Attach current + desired coordinates. A known city is not replaced by a guess. */
   function withPinCoords(s) {
-    var currentCoords = geocodeCurrent(s.current, (s.id != null ? s.id : s.current || "") + "|from");
-    var desiredCoords = geocodeCurrent(s.desired, (s.id != null ? s.id : s.desired || "") + "|to");
+    var currentCoords = pinFromFields(
+      s.currentCity,
+      s.currentState,
+      s.current,
+      (s.id != null ? s.id : s.current || "") + "|from",
+      "current",
+      s
+    );
+    var desiredCoords = pinFromFields(
+      s.desiredCity,
+      s.desiredState,
+      s.desired,
+      (s.id != null ? s.id : s.desired || "") + "|to",
+      "desired",
+      s
+    );
     return Object.assign({}, s, {
       lat: currentCoords.lat,
       lng: currentCoords.lng,
@@ -294,12 +366,19 @@
       } catch (_) { /* ignore */ }
       if (list.length) {
         try {
-          var bounds = L.latLngBounds(
-            list.map(function (s) {
+          var points = list
+            .map(function (s) {
               var pin = activePin(s);
               return [pin.lat, pin.lng];
             })
-          );
+            .filter(function (pair) {
+              return isFinite(pair[0]) && isFinite(pair[1]);
+            });
+          if (!points.length) {
+            map.setView([39.5, -98.35], 4);
+            return;
+          }
+          var bounds = L.latLngBounds(points);
           if (bounds.isValid()) {
             map.fitBounds(bounds.pad(0.2), {
               maxZoom: list.length === 1 ? 8 : 5,
@@ -1003,12 +1082,12 @@
   /** Pin for the question currently on screen. One pin per swap. */
   function activePin(s) {
     if (mapMode === "coming") {
-      var lat = s.desiredLat != null ? Number(s.desiredLat) : Number(s.lat);
-      var lng = s.desiredLng != null ? Number(s.desiredLng) : Number(s.lng);
+      var lat = s.desiredLat != null ? Number(s.desiredLat) : NaN;
+      var lng = s.desiredLng != null ? Number(s.desiredLng) : NaN;
       return {
         lat: lat,
         lng: lng,
-        quality: s.desiredQuality || "approx",
+        quality: s.desiredQuality || "anywhere",
         label: s.desired || "",
       };
     }
@@ -1021,6 +1100,7 @@
   }
 
   function milesBetween(aLat, aLng, bLat, bLng) {
+    if (![aLat, aLng, bLat, bLng].every(function (n) { return isFinite(Number(n)); })) return Infinity;
     var R = 3958.8;
     var toRad = function (d) { return (d * Math.PI) / 180; };
     var dLat = toRad(bLat - aLat);
@@ -1365,14 +1445,20 @@
     markerById.clear();
 
     const placed = spreadPins(
-      filtered.map(function (s) {
-        var pin = activePin(s);
-        return { id: s.id, lat: pin.lat, lng: pin.lng };
-      })
+      filtered
+        .map(function (s) {
+          var pin = activePin(s);
+          return { id: s.id, lat: pin.lat, lng: pin.lng };
+        })
+        .filter(function (pin) {
+          return isFinite(pin.lat) && isFinite(pin.lng);
+        })
     );
 
     filtered.forEach((s) => {
-      const spot = placed.get(String(s.id)) || activePin(s);
+      const pin = activePin(s);
+      if (!isFinite(pin.lat) || !isFinite(pin.lng)) return;
+      const spot = placed.get(String(s.id)) || pin;
       const marker = L.marker([spot.lat, spot.lng], {
         icon: createMarkerIcon(idEq(s.id, activeSwapId)),
         title: `${s.current} → ${s.desired}`,
@@ -2602,7 +2688,8 @@
     ) {
       return;
     }
-    if (editingSwapId && els.formPost) {
+    const wasEditing = !!editingSwapId;
+    if (wasEditing && els.formPost) {
       els.formPost.reset();
       const permanent = els.formPost.querySelector('input[name="swapType"][value="Permanent"]');
       if (permanent) permanent.checked = true;
@@ -2610,7 +2697,11 @@
     editingSwapId = null;
     allowDuplicatePost = false;
     hideDuplicateWarning();
+    hideLocationError();
     setPostMode("new");
+    const craftSelect = $("#post-craft");
+    if (wasEditing || !craftSelect || !craftSelect.value) prefillPostCraft();
+    syncDesiredMode();
     openModal(els.modalPost);
   }
 
@@ -3028,8 +3119,9 @@
     editingSwapId = swap.id;
     allowDuplicatePost = false;
     hideDuplicateWarning();
-    $("#post-current").value = swap.current || "";
-    $("#post-desired").value = swap.desired || "";
+    hideLocationError();
+    if (els.formPost) els.formPost.reset();
+    fillPlaceFromSwap(swap);
     $("#post-craft").value = swap.craft || "";
     $("#post-seniority").value = swap.seniority != null ? String(swap.seniority) : "";
     $("#post-notes").value = swap.notes || "";
@@ -3095,6 +3187,295 @@
     }
   }
 
+  function hideLocationError() {
+    const el = $("#post-location-error");
+    if (!el) return;
+    el.hidden = true;
+    el.textContent = "";
+  }
+
+  function showLocationError(message) {
+    const el = $("#post-location-error");
+    if (!el) return;
+    el.hidden = false;
+    el.textContent = message;
+  }
+
+  function prefillPostCraft() {
+    const sel = $("#post-craft");
+    if (!sel || !user || !user.craft) return;
+    const want = String(user.craft).trim();
+    const match = Array.prototype.some.call(sel.options, function (opt) {
+      return opt.value === want || opt.text === want;
+    });
+    if (match) sel.value = want;
+  }
+
+  function fillStateSelect(select) {
+    if (!select || select.dataset.filled === "1") return;
+    const g = window.PostSwapGeocode;
+    const codes = g && typeof g.stateOptions === "function" ? g.stateOptions() : [];
+    codes.forEach(function (code) {
+      const opt = document.createElement("option");
+      opt.value = code;
+      opt.textContent = code;
+      select.appendChild(opt);
+    });
+    select.dataset.filled = "1";
+  }
+
+  function selectedDesiredMode() {
+    const el = document.querySelector('input[name="desiredMode"]:checked');
+    return el ? el.value : "city";
+  }
+
+  function syncDesiredMode() {
+    const mode = selectedDesiredMode();
+    const city = $("#desired-city-fields");
+    const region = $("#desired-region-fields");
+    const note = $("#desired-anywhere-note");
+    if (city) city.hidden = mode !== "city";
+    if (region) region.hidden = mode !== "region";
+    if (note) note.hidden = mode !== "anywhere";
+  }
+
+  function cleanZip(value) {
+    const zip = String(value || "").trim();
+    if (!zip) return { ok: true, zip: "" };
+    if (!/^\d{5}(?:-\d{4})?$/.test(zip)) {
+      return { ok: false, message: "ZIP must be 5 digits, or leave it blank." };
+    }
+    return { ok: true, zip: zip };
+  }
+
+  function setDesiredMode(mode) {
+    const radio = document.querySelector('input[name="desiredMode"][value="' + mode + '"]');
+    if (radio) radio.checked = true;
+    syncDesiredMode();
+  }
+
+  function fillPlaceFromSwap(swap) {
+    const g = window.PostSwapGeocode;
+    const currentCity = $("#post-current-city");
+    const currentState = $("#post-current-state");
+    const currentZip = $("#post-current-zip");
+    if (swap.currentCity && swap.currentState && currentCity && currentState) {
+      currentCity.value = swap.currentCity;
+      currentState.value = swap.currentState;
+      if (currentZip) currentZip.value = swap.currentZip || "";
+    } else if (g && typeof g.parseLocation === "function") {
+      const parsed = g.parseLocation(swap.current);
+      if (parsed && parsed.ok && parsed.kind === "city" && currentCity && currentState) {
+        currentCity.value = parsed.city;
+        currentState.value = parsed.state;
+        if (currentZip) currentZip.value = parsed.zip || swap.currentZip || "";
+      }
+    }
+    const desired = String(swap.desired || "");
+    if (swap.desiredMode === "anywhere" || (!swap.desiredCity && /^anywhere$/i.test(desired))) {
+      setDesiredMode("anywhere");
+      return;
+    }
+    if (
+      swap.desiredMode === "region" ||
+      (!swap.desiredCity && swap.desiredState && /^anywhere in /i.test(desired))
+    ) {
+      setDesiredMode("region");
+      const region = $("#post-desired-region");
+      if (region) region.value = swap.desiredState || "";
+      return;
+    }
+    if (swap.desiredCity && swap.desiredState) {
+      setDesiredMode("city");
+      const city = $("#post-desired-city");
+      const state = $("#post-desired-state");
+      const zip = $("#post-desired-zip");
+      if (city) city.value = swap.desiredCity;
+      if (state) state.value = swap.desiredState;
+      if (zip) zip.value = swap.desiredZip || "";
+      return;
+    }
+    if (g && typeof g.parseLocation === "function") {
+      const parsed = g.parseLocation(desired);
+      if (parsed && parsed.ok && parsed.kind === "anywhere") {
+        setDesiredMode("anywhere");
+        return;
+      }
+      if (parsed && parsed.ok && parsed.kind === "region") {
+        setDesiredMode("region");
+        const region = $("#post-desired-region");
+        if (region) region.value = parsed.state;
+        return;
+      }
+      if (parsed && parsed.ok && parsed.kind === "city") {
+        setDesiredMode("city");
+        const city = $("#post-desired-city");
+        const state = $("#post-desired-state");
+        const zip = $("#post-desired-zip");
+        if (city) city.value = parsed.city;
+        if (state) state.value = parsed.state;
+        if (zip) zip.value = parsed.zip || "";
+      }
+    }
+    syncDesiredMode();
+  }
+
+  function readPostPlaces() {
+    const g = window.PostSwapGeocode;
+    if (!g || typeof g.lookupCity !== "function") {
+      return { ok: false, message: "City list didn’t load. Refresh the page and try again." };
+    }
+    const currentCity = ($("#post-current-city") && $("#post-current-city").value.trim()) || "";
+    const currentState = ($("#post-current-state") && $("#post-current-state").value) || "";
+    const currentZip = cleanZip($("#post-current-zip") && $("#post-current-zip").value);
+    if (!currentZip.ok) return currentZip;
+    if (!currentCity || !currentState) {
+      return { ok: false, message: "Enter a city and state for where you are now." };
+    }
+    const currentHit = g.lookupCity(currentCity, currentState);
+    if (!currentHit) {
+      return {
+        ok: false,
+        message: "We couldn’t place that current city. Choose a city from the suggestions, or check the state.",
+      };
+    }
+    const mode = selectedDesiredMode();
+    let desired = "";
+    let desiredCity = null;
+    let desiredState = null;
+    let desiredZip = null;
+    let desiredLat = null;
+    let desiredLng = null;
+    let desiredQuality = "";
+    if (mode === "anywhere") {
+      desired = "Anywhere";
+      desiredQuality = "anywhere";
+    } else if (mode === "region") {
+      desiredState = ($("#post-desired-region") && $("#post-desired-region").value) || "";
+      if (!desiredState) {
+        return { ok: false, message: "Choose a state for Anywhere in a state, or switch back to a city." };
+      }
+      const centroid = g.stateCentroid(desiredState);
+      if (!centroid) return { ok: false, message: "Choose a US state for Anywhere in a state." };
+      desired = centroid.label;
+      desiredState = centroid.state;
+      desiredLat = centroid.lat;
+      desiredLng = centroid.lng;
+      desiredQuality = "region";
+    } else {
+      const desiredCityRaw = ($("#post-desired-city") && $("#post-desired-city").value.trim()) || "";
+      const desiredStateRaw = ($("#post-desired-state") && $("#post-desired-state").value) || "";
+      const zip = cleanZip($("#post-desired-zip") && $("#post-desired-zip").value);
+      if (!zip.ok) return zip;
+      if (!desiredCityRaw || !desiredStateRaw) {
+        return {
+          ok: false,
+          message: "Enter a desired city and state, or choose Anywhere / Anywhere in a state.",
+        };
+      }
+      const desiredHit = g.lookupCity(desiredCityRaw, desiredStateRaw);
+      if (!desiredHit) {
+        return {
+          ok: false,
+          message: "We couldn’t place that desired city. Pick a clearer city, or choose Anywhere / Anywhere in a state.",
+        };
+      }
+      desired = desiredHit.label;
+      desiredCity = desiredHit.city;
+      desiredState = desiredHit.state;
+      desiredZip = zip.zip || null;
+      desiredLat = desiredHit.lat;
+      desiredLng = desiredHit.lng;
+      desiredQuality = "city";
+    }
+    return {
+      ok: true,
+      current: currentHit.label,
+      desired: desired,
+      fields: {
+        current: currentHit.label,
+        desired: desired,
+        currentCity: currentHit.city,
+        currentState: currentHit.state,
+        currentZip: currentZip.zip || null,
+        desiredCity: desiredCity,
+        desiredState: desiredState,
+        desiredZip: desiredZip,
+        desiredMode: mode,
+        lat: currentHit.lat,
+        lng: currentHit.lng,
+        desiredLat: desiredLat,
+        desiredLng: desiredLng,
+        desiredQuality: desiredQuality,
+        currentQuality: "city",
+      },
+    };
+  }
+
+  function bindCitySuggest(inputId, listId, stateId) {
+    const input = document.getElementById(inputId);
+    const list = document.getElementById(listId);
+    const state = document.getElementById(stateId);
+    if (!input || !list) return;
+    function hide() {
+      list.hidden = true;
+      list.innerHTML = "";
+    }
+    function show() {
+      const g = window.PostSwapGeocode;
+      const st = state ? state.value : "";
+      const query = input.value.trim();
+      if (!g || typeof g.suggestCities !== "function" || !st || query.length < 1) {
+        hide();
+        return;
+      }
+      const hits = g.suggestCities(query, st, 8);
+      if (!hits.length) {
+        hide();
+        return;
+      }
+      list.innerHTML = hits
+        .map(function (hit) {
+          return (
+            '<li><button type="button" data-city="' +
+            escapeHtml(hit.city) +
+            '">' +
+            escapeHtml(hit.label) +
+            "</button></li>"
+          );
+        })
+        .join("");
+      list.hidden = false;
+    }
+    input.addEventListener("input", function () {
+      allowDuplicatePost = false;
+      hideDuplicateWarning();
+      hideLocationError();
+      show();
+    });
+    input.addEventListener("focus", show);
+    list.addEventListener("mousedown", function (e) {
+      const btn = e.target.closest("button[data-city]");
+      if (!btn) return;
+      e.preventDefault();
+      input.value = btn.getAttribute("data-city") || "";
+      hide();
+      allowDuplicatePost = false;
+      hideDuplicateWarning();
+    });
+    input.addEventListener("blur", function () {
+      setTimeout(hide, 160);
+    });
+    if (state) {
+      state.addEventListener("change", function () {
+        allowDuplicatePost = false;
+        hideDuplicateWarning();
+        hideLocationError();
+        if (document.activeElement === input) show();
+      });
+    }
+  }
+
   // ---------- Post swap ----------
   async function handlePost(e) {
     e.preventDefault();
@@ -3105,27 +3486,36 @@
       return;
     }
 
-    const current = $("#post-current").value.trim();
-    const desired = $("#post-desired").value.trim();
+    const place = readPostPlaces();
     const craft = $("#post-craft").value;
     const seniority = parseFloat($("#post-seniority").value);
     const swapType =
       (els.formPost.querySelector('input[name="swapType"]:checked') || {}).value || "Permanent";
     const notes = $("#post-notes").value.trim();
 
-    if (!current || !desired || !craft || Number.isNaN(seniority)) {
+    if (!place.ok) {
+      console.warn("[PostSwap] handlePost: location rejected", place.message);
+      showLocationError(place.message);
+      showToast("Check the location", place.message);
+      return;
+    }
+    hideLocationError();
+    const current = place.current;
+    const desired = place.desired;
+
+    if (!craft || Number.isNaN(seniority)) {
       console.warn("[PostSwap] handlePost: validation failed", {
         current,
         desired,
         craft,
         seniority,
       });
-      showToast("Missing fields", "Fill in current/desired location, craft, and seniority.");
+      showToast("Missing fields", "Choose a craft and years of seniority.");
       return;
     }
 
     if (editingSwapId) {
-      await saveEditedSwap({ current: current, desired: desired, craft: craft, seniority: seniority, swapType: swapType, notes: notes });
+      await saveEditedSwap(Object.assign({ craft: craft, seniority: seniority, swapType: swapType, notes: notes }, place.fields));
       return;
     }
 
@@ -3142,23 +3532,20 @@
     const submitBtn = $("#post-submit-btn");
     setButtonLoading(submitBtn, true);
 
-    const coords = geocodeCurrent(current, user && user.id ? user.id + "-" + current : current);
     const region = regionFromLocation(current);
-    const draft = {
+    const draft = Object.assign({}, place.fields, {
       current,
       desired,
       craft,
       seniority,
       swapType,
       notes: notes || "Looking for a good mutual match.",
-      lat: coords.lat,
-      lng: coords.lng,
       region,
       privacyLabel: `Verified Carrier • ${region}`,
       ownerId: user ? user.id : "guest",
       status: "open",
       justAdded: true,
-    };
+    });
 
     console.log("[PostSwap] handlePost: draft swap", draft, {
       useSupabase,
@@ -3217,6 +3604,8 @@
     setButtonLoading(submitBtn, false);
     closeAllModals();
     els.formPost.reset();
+    syncDesiredMode();
+    hideLocationError();
     const permanent = els.formPost.querySelector('input[name="swapType"][value="Permanent"]');
     if (permanent) permanent.checked = true;
 
@@ -3229,7 +3618,12 @@
 
     if (map) {
       var postedPin = activePin(newSwap);
-      map.flyTo([postedPin.lat, postedPin.lng], 8, { duration: 1 });
+      if (!isFinite(postedPin.lat) || !isFinite(postedPin.lng)) {
+        postedPin = { lat: newSwap.currentLat, lng: newSwap.currentLng };
+      }
+      if (isFinite(postedPin.lat) && isFinite(postedPin.lng)) {
+        map.flyTo([postedPin.lat, postedPin.lng], 8, { duration: 1 });
+      }
     }
 
     console.log("[PostSwap] handlePost: done", {
@@ -3240,9 +3634,11 @@
 
     showToast(
       savedRemote ? "Swap posted to cloud!" : "Swap posted!",
-      user
-        ? `You're live, ${user.name.split(" ")[0]}. Check My Swaps anytime.`
-        : "Your request is on the map. Login to manage it under My Swaps."
+      newSwap.locationColumnsMissing
+        ? "The listing is saved. Add the location columns in Supabase so city, state, and coordinates are stored too."
+        : user
+          ? `You're live, ${user.name.split(" ")[0]}. Check My Swaps anytime.`
+          : "Your request is on the map. Login to manage it under My Swaps."
     );
 
     // Email carriers: same home state AND exact craft match only
@@ -3289,6 +3685,19 @@
         const saved = await db().updateSwap(existing.id, {
           current: fields.current,
           desired: fields.desired,
+          currentCity: fields.currentCity,
+          currentState: fields.currentState,
+          currentZip: fields.currentZip,
+          desiredCity: fields.desiredCity,
+          desiredState: fields.desiredState,
+          desiredZip: fields.desiredZip,
+          desiredMode: fields.desiredMode,
+          desiredLat: fields.desiredLat,
+          desiredLng: fields.desiredLng,
+          desiredQuality: fields.desiredQuality,
+          currentQuality: fields.currentQuality,
+          lat: fields.lat,
+          lng: fields.lng,
           craft: fields.craft,
           seniority: fields.seniority,
           notes: notes,
@@ -3307,7 +3716,12 @@
       setButtonLoading(submitBtn, false);
       if (els.formPost) els.formPost.reset();
       openMySwaps(savedId);
-      showToast("Swap updated", "The public map shows the new details if this listing is still open.");
+      showToast(
+        "Swap updated",
+        next.locationColumnsMissing
+          ? "Details saved. Add the location columns in Supabase so city and coordinates are stored too."
+          : "The public map shows the new details if this listing is still open."
+      );
     } catch (err) {
       console.error("[PostSwap] edit swap failed", err);
       setButtonLoading(submitBtn, false);
@@ -3612,12 +4026,31 @@
 
     // Forms
     els.formPost.addEventListener("submit", handlePost);
-    ["post-current", "post-desired"].forEach(function (id) {
+    ["post-current-state", "post-desired-state", "post-desired-region"].forEach(function (id) {
+      fillStateSelect(document.getElementById(id));
+    });
+    bindCitySuggest("post-current-city", "post-current-suggest", "post-current-state");
+    bindCitySuggest("post-desired-city", "post-desired-suggest", "post-desired-state");
+    document.querySelectorAll('input[name="desiredMode"]').forEach(function (radio) {
+      radio.addEventListener("change", function () {
+        allowDuplicatePost = false;
+        hideDuplicateWarning();
+        hideLocationError();
+        syncDesiredMode();
+      });
+    });
+    ["post-current-state", "post-desired-state", "post-desired-region", "post-current-zip", "post-desired-zip"].forEach(function (id) {
       const input = document.getElementById(id);
       if (!input) return;
       input.addEventListener("input", function () {
         allowDuplicatePost = false;
         hideDuplicateWarning();
+        hideLocationError();
+      });
+      input.addEventListener("change", function () {
+        allowDuplicatePost = false;
+        hideDuplicateWarning();
+        hideLocationError();
       });
     });
     const dupEdit = $("#swap-duplicate-edit");
@@ -3680,8 +4113,37 @@
     });
 
     els.useLocationBtn.addEventListener("click", () => {
-      $("#post-current").value = "North Las Vegas, NV";
-      showToast("Location set", "Using North Las Vegas, NV for this demo.");
+      const geo = navigator.geolocation;
+      if (!geo || typeof geo.getCurrentPosition !== "function") {
+        showToast("Location unavailable", "This browser can’t share a location. Enter a city and state.");
+        return;
+      }
+      els.useLocationBtn.disabled = true;
+      geo.getCurrentPosition(
+        function (pos) {
+          els.useLocationBtn.disabled = false;
+          const g = window.PostSwapGeocode;
+          const hit =
+            g && typeof g.nearestCity === "function"
+              ? g.nearestCity(pos.coords.latitude, pos.coords.longitude, 40)
+              : null;
+          if (!hit) {
+            showToast("No city match", "No listed city is close enough. Enter the city and state yourself.");
+            return;
+          }
+          const city = $("#post-current-city");
+          const state = $("#post-current-state");
+          if (city) city.value = hit.city;
+          if (state) state.value = hit.state;
+          hideLocationError();
+          showToast("Location set", hit.city + ", " + hit.state + ". Change it if that’s the wrong office.");
+        },
+        function () {
+          els.useLocationBtn.disabled = false;
+          showToast("Location blocked", "Allow location access, or enter a city and state.");
+        },
+        { enableHighAccuracy: false, timeout: 8000, maximumAge: 300000 }
+      );
     });
 
     els.demoLoginBtn.addEventListener("click", demoLogin);

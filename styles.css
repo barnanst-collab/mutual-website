@@ -2849,6 +2849,70 @@ body.modal-open .bmc-float {
 .input-row input { flex: 1; min-width: 0; }
 .input-row .btn { flex-shrink: 0; }
 
+.form-label {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.loc-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.75rem;
+}
+@media (min-width: 640px) {
+  .loc-grid { grid-template-columns: 1.4fr 0.7fr 0.8fr; }
+}
+.loc-grid[hidden],
+#desired-region-fields[hidden],
+#desired-anywhere-note[hidden],
+.city-suggest[hidden],
+.form-error[hidden] {
+  display: none !important;
+}
+.city-field { position: relative; }
+.city-suggest {
+  position: absolute;
+  z-index: 6;
+  left: 0;
+  right: 0;
+  top: calc(100% - 0.1rem);
+  margin: 0;
+  padding: 0.25rem;
+  list-style: none;
+  background: #fff;
+  border: 1.5px solid var(--border);
+  border-radius: 0.75rem;
+  box-shadow: var(--shadow);
+  max-height: 220px;
+  overflow: auto;
+}
+.city-suggest button {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  padding: 0.5rem 0.7rem;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text);
+}
+.city-suggest button:hover,
+.city-suggest button:focus { background: var(--usps-blue-soft); }
+.loc-mode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.loc-mode .radio-card { flex: 1 1 140px; }
+.form-error {
+  color: var(--usps-red);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+#use-location-btn { align-self: flex-start; }
+#desired-region-fields { display: flex; flex-direction: column; gap: 0.4rem; }
+
 .radio-group {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

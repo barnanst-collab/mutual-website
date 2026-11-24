@@ -286,7 +286,7 @@
     }
     if (g && city && state && typeof g.lookupCity === "function") {
       var hit = g.lookupCity(city, state);
-      if (hit) return { lat: hit.lat, lng: hit.lng, quality: "city" };
+      if (hit) return { lat: hit.lat, lng: hit.lng, quality: hit.quality || "city" };
     }
     if (g && text && typeof g.parseLocation === "function") {
       var parsed = g.parseLocation(text);

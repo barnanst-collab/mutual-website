@@ -650,6 +650,14 @@
   function cityIndex() {
     if (CITY_INDEX) return CITY_INDEX;
     var rows = [];
+    var seen = {};
+    function add(row) {
+      if (!row || !row.name || !row.state) return;
+      var id = row.name + "|" + row.state;
+      if (seen[id]) return;
+      seen[id] = 1;
+      rows.push(row);
+    }
     Object.keys(CITY_COORDS).forEach(function (key) {
       var lower = String(key).toLowerCase();
       var name = "";
@@ -666,7 +674,7 @@
         name = normalizeCity(key);
         state = CITY_HOME[name] || null;
       }
-      rows.push({
+      add({
         key: key,
         name: name,
         state: state,
@@ -674,6 +682,19 @@
         lng: CITY_COORDS[key][1],
       });
     });
+    var extra = global.PostSwapCityRows || [];
+    for (var i = 0; i < extra.length; i++) {
+      var rec = extra[i];
+      if (!rec) continue;
+      add({
+        key: rec[0],
+        name: normalizeCity(rec[0]),
+        state: normalizeState(rec[1]),
+        lat: Number(rec[2]),
+        lng: Number(rec[3]),
+        display: rec[4] || "",
+      });
+    }
     CITY_INDEX = rows;
     return rows;
   }
@@ -688,25 +709,125 @@
       });
   }
 
-  /** Exact city + state. No substring match and no state-center fallback. */
+  var JUNK_CITY = {
+    asdf: 1,
+    asdfg: 1,
+    asdfgh: 1,
+    qwerty: 1,
+    qwert: 1,
+    zxcv: 1,
+    zxcvb: 1,
+    xyzzy: 1,
+    test: 1,
+    testing: 1,
+    foo: 1,
+    bar: 1,
+    baz: 1,
+    junk: 1,
+    fake: 1,
+    none: 1,
+    nothing: 1,
+    nowhere: 1,
+    somewhere: 1,
+    anywhere: 1,
+    unknown: 1,
+    placeholder: 1,
+    sample: 1,
+    demo: 1,
+    null: 1,
+    undefined: 1,
+    xxx: 1,
+    abc: 1,
+    abcd: 1,
+    blah: 1,
+    hello: 1,
+    na: 1,
+    tba: 1,
+    tbd: 1,
+    city: 1,
+    town: 1,
+    whatever: 1,
+    idk: 1,
+    nope: 1,
+    "not a real city": 1,
+    "fake city": 1,
+    "test city": 1,
+    "any city": 1,
+    "no city": 1,
+  };
+
+  /** A typed name that could be a place, rather than keyboard mash or a filler word. */
+  function plausibleCityName(city) {
+    var name = normalizeCity(city);
+    if (!name || name.length < 3 || name.length > 40) return false;
+    if (!/^[a-z]+(?: [a-z]+)*$/.test(name)) return false;
+    if (JUNK_CITY[name]) return false;
+    if (!/[aeiouy]/.test(name)) return false;
+    if (/([a-z])\1{3,}/.test(name)) return false;
+    if (/[bcdfghjklmnpqrstvwxz]{5,}/.test(name)) return false;
+    var words = name.split(" ");
+    if (words.length > 5) return false;
+    for (var i = 0; i < words.length; i++) {
+      if (words[i].length < 2 && words[i] !== "a") return false;
+    }
+    return true;
+  }
+
+  /** Keep an unlisted but real-looking city inside its state instead of rejecting it. */
+  function placeInState(city, state) {
+    var st = normalizeState(state);
+    var base = st && STATE_COORDS[st];
+    if (!base) return null;
+    var h = hashStr(normalizeCity(city) + "|" + st);
+    var spread = st === "DC" ? 0.04 : st === "RI" ? 0.12 : st === "DE" || st === "CT" ? 0.2 : 0.7;
+    var lat = base[0] + (((h % 1000) / 1000) - 0.5) * spread;
+    var lng = base[1] + (((((h / 1000) | 0) % 1000) / 1000) - 0.5) * spread;
+    return { lat: lat, lng: lng };
+  }
+
+  function packCity(row, quality) {
+    var display = row.display || titleCity(row.name);
+    return {
+      city: display,
+      state: row.state,
+      lat: row.lat,
+      lng: row.lng,
+      quality: quality || "city",
+      label: display + ", " + row.state,
+    };
+  }
+
+  var CITY_MAP = null;
+
+  function cityMap() {
+    if (CITY_MAP) return CITY_MAP;
+    var map = {};
+    cityIndex().forEach(function (row) {
+      var id = row.name + "|" + row.state;
+      if (!map[id]) map[id] = row;
+    });
+    CITY_MAP = map;
+    return map;
+  }
+
+  /**
+   * City + state. Listed cities use their coordinates.
+   * A real-looking name that is not on the list is still accepted inside that state.
+   * Gibberish and filler words return null.
+   */
   function lookupCity(city, state) {
     var name = normalizeCity(city);
     var st = normalizeState(state);
     if (!name || !st) return null;
-    var rows = cityIndex().filter(function (row) {
-      return row.name === name && row.state === st;
-    });
-    if (!rows.length) return null;
-    var row = rows[0];
-    var display = titleCity(row.name);
-    return {
-      city: display,
-      state: st,
-      lat: row.lat,
-      lng: row.lng,
-      quality: "city",
-      label: display + ", " + st,
-    };
+    var row = cityMap()[name + "|" + st];
+    if (row && isFinite(row.lat) && isFinite(row.lng)) return packCity(row, "city");
+    if (!plausibleCityName(name)) return null;
+    var placed = placeInState(name, st);
+    if (!placed) return null;
+    return packCity(
+      { name: name, state: st, lat: placed.lat, lng: placed.lng, display: titleCity(name) },
+      "accepted"
+    );
   }
 
   function suggestCities(query, state, limit) {
@@ -718,13 +839,11 @@
     var seen = {};
     var out = [];
     cityIndex().forEach(function (row) {
-      if (!row.name || row.name.indexOf(q) === -1) return;
-      var hit = lookupCity(row.name, st);
-      if (!hit) return;
-      var id = hit.city + "|" + hit.state;
+      if (row.state !== st || !row.name || row.name.indexOf(q) === -1) return;
+      var id = row.name + "|" + row.state;
       if (seen[id]) return;
       seen[id] = 1;
-      out.push(hit);
+      out.push(packCity(row, "city"));
     });
     out.sort(function (a, b) {
       var an = normalizeCity(a.city);

@@ -727,6 +727,11 @@ ul { list-style: none; }
   height: min(560px, calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 0.75rem));
   max-height: min(560px, calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 0.75rem));
 }
+/* ID display:flex would otherwise keep these modals visible after [hidden]. */
+#modal-inbox[hidden],
+#modal-dm[hidden] {
+  display: none !important;
+}
 .modal-inbox {
   width: min(820px, calc(100% - 1.25rem));
 }

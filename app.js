@@ -2733,6 +2733,28 @@
     }
   }
 
+  function openInboxFullChat() {
+    if (!activeInboxThreadKey) return;
+    const thread = inboxThreads.find(function (t) { return t.key === activeInboxThreadKey; });
+    if (!thread) return;
+    const swap = thread.swap || findSwapById(thread.swapId) || {
+      id: thread.swapId,
+      current: "",
+      desired: "",
+      craft: "Letter Carrier",
+      seniority: 0,
+      swapType: "Permanent",
+      privacyLabel: "",
+      region: "United States",
+      notes: "",
+    };
+    openDm(swap, {
+      addressId: thread.addressId || thread.otherRaw || "",
+      threadKey: thread.key,
+      peerName: thread.peerName,
+    });
+  }
+
   async function openDm(swap, opts) {
     opts = opts || {};
     if (
@@ -2744,11 +2766,12 @@
     }
     if (!swap) return;
 
-    await ensureProfileIndex(false);
     currentDmSwap = swap;
     currentDmThreadKey = opts.threadKey || null;
     if (opts.addressId) {
       currentDmAddressId = opts.addressId;
+    } else if (opts.threadKey) {
+      currentDmAddressId = null;
     } else {
       const raw = swap.ownerId || swap.username || "";
       const synthetic = {
@@ -2769,7 +2792,7 @@
 
     applyDmHeading(swap, currentDmAddressId, opts.peerName);
 
-    els.chatBody.innerHTML = '<div class="chat-empty">Loading conversation…</div>';
+    if (els.chatBody) els.chatBody.innerHTML = '<div class="chat-empty">Loading conversation…</div>';
     if (els.dmInput) els.dmInput.value = "";
     clearDmError();
     openModal(els.modalDm);
@@ -2777,6 +2800,9 @@
     startMessagePoll();
 
     try {
+      await ensureProfileIndex(false);
+      if (!els.modalDm || els.modalDm.hidden || currentDmSwap !== swap) return;
+      applyDmHeading(swap, currentDmAddressId, opts.peerName);
       let history = await loadThreadHistory(swap, currentDmAddressId, currentDmThreadKey);
       let mixed = false;
       if (!currentDmAddressId && history.length) {
@@ -3142,27 +3168,13 @@
         if (els.formDm) els.formDm.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
       });
     }
-    if (els.inboxOpenDm) {
-      els.inboxOpenDm.addEventListener("click", function () {
-        if (!activeInboxThreadKey) return;
-        const thread = inboxThreads.find(function (t) { return t.key === activeInboxThreadKey; });
-        if (!thread) return;
-        const swap = thread.swap || findSwapById(thread.swapId) || {
-          id: thread.swapId,
-          current: "",
-          desired: "",
-          craft: "Letter Carrier",
-          seniority: 0,
-          swapType: "Permanent",
-          privacyLabel: "",
-          region: "United States",
-          notes: "",
-        };
-        openDm(swap, {
-          addressId: thread.addressId,
-          threadKey: thread.key,
-          peerName: thread.peerName,
-        });
+    if (els.modalInbox) {
+      els.modalInbox.addEventListener("click", function (e) {
+        const btn = e.target.closest("#inbox-open-dm");
+        if (!btn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        openInboxFullChat();
       });
     }
     if (els.mailboxList) {

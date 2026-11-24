@@ -4,7 +4,8 @@
 
 -- Existing: public.swaps, public."messages (for DMs)"
 alter table if exists public.swaps disable row level security;
-alter table if exists public."messages (for DMs)" disable row level security;
+-- Messages RLS is enabled at the bottom of this file.
+-- A user may read a row only when from_user or to_user is one of their identity keys.
 
 -- ---------- Profiles (email + notification settings) ----------
 create table if not exists public.profiles (
@@ -23,6 +24,8 @@ create table if not exists public.profiles (
     "onStateSwap": true,
     "onDm": true
   }'::jsonb,
+  -- Message ids this account has opened. Client also keeps a per-user local copy.
+  dm_read_ids jsonb not null default '[]'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -58,3 +61,63 @@ comment on table public.email_queue is
 
 -- ---------- Helper: default notifications if missing ----------
 -- (client also sends full notifications object on save)
+
+-- Per-account inbox read state (safe to re-run)
+alter table public.profiles
+  add column if not exists dm_read_ids jsonb not null default '[]'::jsonb;
+
+-- ---------- Messages RLS ----------
+-- The app signs in with its own profiles, not Supabase Auth, so auth.uid()
+-- cannot name the participant. The client sends identity keys in the
+-- x-postswap-keys header as UTF-8 base64 of values joined by "|".
+-- The browser never requests this table without a from_user / to_user filter.
+-- Run this block in the SQL editor to enforce it on the server.
+
+create or replace function public.postswap_participant_keys()
+returns text[]
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+  raw text;
+  decoded text;
+begin
+  raw := nullif(current_setting('request.headers', true), '')::json->>'x-postswap-keys';
+  if raw is null or raw = '' then
+    return array[]::text[];
+  end if;
+  decoded := convert_from(decode(raw, 'base64'), 'utf8');
+  return string_to_array(decoded, '|');
+exception when others then
+  return array[]::text[];
+end;
+$$;
+
+revoke all on function public.postswap_participant_keys() from public;
+grant execute on function public.postswap_participant_keys() to anon, authenticated;
+
+alter table if exists public."messages (for DMs)" enable row level security;
+
+drop policy if exists "messages_select_anon" on public."messages (for DMs)";
+drop policy if exists "messages_insert_anon" on public."messages (for DMs)";
+drop policy if exists "messages_select_participant" on public."messages (for DMs)";
+drop policy if exists "messages_insert_participant" on public."messages (for DMs)";
+
+create policy "messages_select_participant"
+  on public."messages (for DMs)"
+  for select
+  to anon, authenticated
+  using (
+    from_user = any (public.postswap_participant_keys())
+    or to_user = any (public.postswap_participant_keys())
+  );
+
+create policy "messages_insert_participant"
+  on public."messages (for DMs)"
+  for insert
+  to anon, authenticated
+  with check (
+    from_user = any (public.postswap_participant_keys())
+  );

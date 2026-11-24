@@ -10,13 +10,47 @@
 (function (global) {
   "use strict";
 
-  const BUILD = "2026-07-14a";
+  const BUILD = "2026-11-23name";
   const SUPABASE_URL = "https://olfystbcngdcevtndkdq.supabase.co";
   const SUPABASE_ANON_KEY =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9sZnlzdGJjbmdkY2V2dG5ka2RxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM2MzE5NTMsImV4cCI6MjA5OTIwNzk1M30.Kr47X97Wrpppt2Vs-XhOzYMsQD8PmAPwbuWEyG8xEAk";
 
   const REST = `${SUPABASE_URL}/rest/v1`;
-  const MESSAGES_TABLE = "messages%20(for%20DMs)";
+
+  /** Encode a table name for the REST path, including spaces and parentheses. */
+  function encodeRestSegment(name) {
+    return encodeURIComponent(name).replace(/[!'()*]/g, function (ch) {
+      return "%" + ch.charCodeAt(0).toString(16).toUpperCase();
+    });
+  }
+
+  // public."messages (for DMs)" — never request this table without a participant filter.
+  const MESSAGES_TABLE = encodeRestSegment("messages (for DMs)");
+
+  /** UTF-8 base64 so identity keys (including “•”) are a legal HTTP header value. */
+  function utf8ToB64(str) {
+    try {
+      return btoa(unescape(encodeURIComponent(str)));
+    } catch (_) {
+      return btoa(String(str));
+    }
+  }
+
+  /** Header the messages RLS policy reads. Keys are joined with “|” then base64-encoded. */
+  function participantKeysHeader(keys) {
+    try {
+      const joined = (keys || [])
+        .map(function (k) {
+          return k == null ? "" : String(k).trim().replace(/\|/g, "/");
+        })
+        .filter(Boolean)
+        .join("|");
+      if (!joined) return {};
+      return { "x-postswap-keys": utf8ToB64(joined) };
+    } catch (_) {
+      return {};
+    }
+  }
 
   function headers(extra = {}) {
     return {
@@ -364,6 +398,137 @@
     return keySet;
   }
 
+  function indexProfiles(profiles) {
+    const map = new Map();
+    (profiles || []).forEach(function (p) {
+      if (!p) return;
+      userIdentityKeys(p).forEach(function (k) {
+        if (k == null || k === "") return;
+        map.set(String(k).toLowerCase(), p);
+      });
+    });
+    return map;
+  }
+
+  function looksLikeRawId(value) {
+    const s = String(value || "").trim();
+    if (!s) return false;
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return true;
+    if (/^user-\d{6,}/i.test(s)) return true;
+    if (/^[0-9a-f]{20,}$/i.test(s)) return true;
+    return false;
+  }
+
+  function readableLabel(value) {
+    const s = String(value || "").trim();
+    if (!s) return "";
+    const lower = s.toLowerCase();
+    if (lower === "anonymous" || lower === "guest" || lower === "verified carrier") return "";
+    if (looksLikeRawId(s)) return "";
+    if (/^verified carrier\b/i.test(s)) {
+      const rest = s.replace(/^verified carrier\s*[•·|\-–—:]+\s*/i, "").trim();
+      return readableLabel(rest);
+    }
+    return s;
+  }
+
+  function shortNameFromEmail(email) {
+    const s = String(email || "").trim();
+    if (s.indexOf("@") === -1) return "";
+    const local = s.split("@")[0].replace(/[._]+/g, " ").trim();
+    if (local && !looksLikeRawId(local) && local.toLowerCase() !== "verified carrier") return local;
+    return s;
+  }
+
+  /**
+   * Visible sender name: profile name, then the stored from_user value,
+   * then a short email name. Never a raw UUID or "Verified Carrier".
+   */
+  function displayNameFor(raw, profileIndex) {
+    const s = String(raw || "").trim();
+    const profile =
+      profileIndex && typeof profileIndex.get === "function" && s
+        ? profileIndex.get(s.toLowerCase())
+        : null;
+    if (profile) {
+      const name = readableLabel(profile.name);
+      if (name) return name;
+      const fromEmail = shortNameFromEmail(profile.email);
+      if (fromEmail) return fromEmail;
+    }
+    const direct = readableLabel(s);
+    if (!direct) return "Carrier";
+    if (direct.indexOf("@") !== -1) return shortNameFromEmail(direct) || direct;
+    if (direct.length > 48) return "Carrier";
+    return direct;
+  }
+
+  function canonicalPartyToken(raw, swap, profileIndex) {
+    const s = String(raw || "").trim();
+    if (!s) return "unknown";
+    const lower = s.toLowerCase();
+    const profile =
+      profileIndex && typeof profileIndex.get === "function" ? profileIndex.get(lower) : null;
+    if (profile && profile.id) return "id:" + String(profile.id).toLowerCase();
+    if (swap) {
+      const ownerId = swap.ownerId ? String(swap.ownerId).toLowerCase() : "";
+      const username = swap.username ? String(swap.username).toLowerCase() : "";
+      if ((ownerId && lower === ownerId) || (username && lower === username)) {
+        return "owner:" + String(swap.id) + ":" + (ownerId || username || "listing");
+      }
+    }
+    return "raw:" + lower;
+  }
+
+  function addressIdFor(raw, profileIndex) {
+    const s = String(raw || "").trim();
+    if (!s) return "";
+    const profile =
+      profileIndex && typeof profileIndex.get === "function" ? profileIndex.get(s.toLowerCase()) : null;
+    if (profile && profile.id) return String(profile.id);
+    return s;
+  }
+
+  /**
+   * The other person on a message, using every identity key (id, email, name),
+   * not only user.id. Older rows stored mixed from_user / to_user values.
+   */
+  function otherPartyRaw(message, user, swap) {
+    const mySet = keySetFromList(userIdentityKeys(user));
+    const from = String((message && message.senderId) || "").trim();
+    const to = String((message && message.toUser) || "").trim();
+    const fromMe = !!(from && mySet[from.toLowerCase()]);
+    const toMe = !!(to && mySet[to.toLowerCase()]);
+    if (fromMe && to && !toMe) return to;
+    if (toMe && from && !fromMe) return from;
+    if (fromMe && !to && swap) {
+      const ownerId = swap.ownerId ? String(swap.ownerId) : "";
+      const username = swap.username ? String(swap.username) : "";
+      const owns =
+        (ownerId && mySet[ownerId.toLowerCase()]) ||
+        (username && mySet[username.toLowerCase()]);
+      if (!owns) return ownerId || username || "";
+    }
+    return "";
+  }
+
+  /**
+   * Conversation key is swap id + the other person, so two carriers
+   * messaging one listing stay in separate threads.
+   */
+  function conversationKey(message, user, swap, profileIndex) {
+    const mySet = keySetFromList(userIdentityKeys(user));
+    const otherRaw = otherPartyRaw(message, user, swap);
+    const token = otherRaw ? canonicalPartyToken(otherRaw, swap, profileIndex) : "unknown";
+    const from = String((message && message.senderId) || "").trim();
+    return {
+      key: String(message && message.swapId) + "::" + token,
+      otherRaw: otherRaw,
+      addressId: addressIdFor(otherRaw, profileIndex),
+      fromMe: !!(from && mySet[from.toLowerCase()]),
+    };
+  }
+
   /**
    * Messages on a single swap visible only to the current user
    * (from_user / to_user matches their id or username).
@@ -383,6 +548,7 @@
       }
 
       // and=(swap_id.eq.X,or(from_user.eq.me,to_user.eq.me,...))
+      // Never fall back to an unfiltered swap dump.
       const path =
         "/" +
         MESSAGES_TABLE +
@@ -392,23 +558,7 @@
         orInner +
         ")&select=*&order=created_at.asc";
 
-      let rows;
-      try {
-        rows = await request(path);
-      } catch (filterErr) {
-        // Fallback: filter by swap then client-side (if nested and/or fails on project)
-        console.warn(
-          "[PostSwapDB] fetchMessages nested filter failed, client filter fallback",
-          filterErr && filterErr.message
-        );
-        rows = await request(
-          "/" +
-            MESSAGES_TABLE +
-            "?swap_id=eq." +
-            encodeURIComponent(String(swapId)) +
-            "&select=*&order=created_at.asc"
-        );
-      }
+      const rows = await request(path, { headers: participantKeysHeader(keys) });
 
       const keySet = keySetFromList(keys);
       const mapped = (rows || [])
@@ -456,22 +606,8 @@
         "&select=*&order=created_at.desc&limit=" +
         lim;
 
-      let rows;
-      try {
-        rows = await request(path);
-      } catch (filterErr) {
-        // Fallback path: fetch recent and filter client-side only for this user
-        console.warn(
-          "[PostSwapDB] fetchMessagesForUser or= filter failed, using client filter",
-          filterErr && filterErr.message
-        );
-        rows = await request(
-          "/" +
-            MESSAGES_TABLE +
-            "?select=*&order=created_at.desc&limit=" +
-            lim
-        );
-      }
+      // Participant filter is required. Do not load the recent-messages table into the browser.
+      const rows = await request(path, { headers: participantKeysHeader(keys) });
 
       const mapped = (rows || []).map(mapMessageRow);
       const filtered = mapped.filter(function (m) {
@@ -496,12 +632,55 @@
     }
   }
 
-  /** @deprecated Prefer fetchMessagesForUser — unfiltered dump is privacy-unsafe */
-  async function fetchAllMessages(limit) {
+  /** Refuses an unfiltered messages read. Inbox must use fetchMessagesForUser. */
+  async function fetchAllMessages() {
     console.warn(
-      "[PostSwapDB] fetchAllMessages is deprecated for inbox; use fetchMessagesForUser"
+      "[PostSwapDB] fetchAllMessages refused — messages are loaded only for the signed-in participant"
     );
-    return fetchMessagesForUser(null, limit);
+    return [];
+  }
+
+  /** Per-account read ids stored on profiles.dm_read_ids when that column exists. */
+  async function fetchDmReadIds(userId) {
+    if (!userId) return null;
+    try {
+      const rows = await request(
+        "/profiles?id=eq." +
+          encodeURIComponent(String(userId)) +
+          "&select=dm_read_ids&limit=1"
+      );
+      if (!rows || !rows.length) return [];
+      const raw = rows[0].dm_read_ids;
+      if (Array.isArray(raw)) return raw.map(String);
+      if (typeof raw === "string") {
+        try {
+          const parsed = JSON.parse(raw);
+          return Array.isArray(parsed) ? parsed.map(String) : [];
+        } catch (_) {
+          return [];
+        }
+      }
+      return [];
+    } catch (err) {
+      console.warn("[PostSwapDB] fetchDmReadIds skipped", err && err.message);
+      return null;
+    }
+  }
+
+  async function saveDmReadIds(userId, ids) {
+    if (!userId) return false;
+    const payload = { dm_read_ids: (ids || []).map(String).slice(-400) };
+    try {
+      await request("/profiles?id=eq." + encodeURIComponent(String(userId)), {
+        method: "PATCH",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify(payload),
+      });
+      return true;
+    } catch (err) {
+      console.warn("[PostSwapDB] saveDmReadIds skipped", err && err.message);
+      return false;
+    }
   }
 
   /** Recent email_queue rows for this user's email (real notification activity). */
@@ -536,18 +715,25 @@
     }
   }
 
-  async function sendMessage({ swapId, senderId, toUser, body }) {
+  async function sendMessage({ swapId, senderId, toUser, body, identityKeys }) {
     const payload = {
       swap_id: String(swapId),
       from_user: senderId || "anonymous",
       to_user: toUser || null,
       message: body,
     };
+    const keys =
+      identityKeys && identityKeys.length
+        ? identityKeys
+        : [senderId].filter(Boolean);
     console.log("[PostSwapDB] sendMessage payload →", payload);
     try {
       const rows = await request(`/${MESSAGES_TABLE}`, {
         method: "POST",
-        headers: { Prefer: "return=representation" },
+        headers: Object.assign(
+          { Prefer: "return=representation" },
+          participantKeysHeader(keys)
+        ),
         body: JSON.stringify(payload),
       });
       const r = Array.isArray(rows) ? rows[0] : rows;
@@ -572,7 +758,7 @@
         data: err && err.data,
         payload,
         tip:
-          'If status is 401/403: disable RLS on public."messages (for DMs)" (see supabase-schema.sql).',
+          'If status is 401/403: messages RLS only allows rows whose from_user or to_user is in the x-postswap-keys header (see supabase-schema.sql).',
       });
       throw err;
     }
@@ -763,24 +949,42 @@
    * Notify swap owner of a new DM (if their profile opts in).
    * @param {{ swap, messageBody, fromUser }} args
    */
-  async function notifyNewDm({ swap, messageBody, fromUser }) {
-    console.log("[PostSwapDB] notifyNewDm", { swapId: swap && swap.id, fromUser });
+  async function notifyNewDm({ swap, messageBody, fromUser, recipientId }) {
+    console.log("[PostSwapDB] notifyNewDm", {
+      swapId: swap && swap.id,
+      fromUser,
+      recipientId: recipientId || null,
+    });
     if (!swap) return { queued: 0 };
 
-    let owner = null;
-    if (swap.ownerId) {
+    const senderId = fromUser && (fromUser.id || fromUser);
+    const explicit = recipientId != null && String(recipientId) !== "";
+    let recipient = null;
+
+    if (explicit && String(recipientId) !== String(senderId)) {
       try {
-        owner = await fetchProfile(swap.ownerId);
+        recipient = await fetchProfile(recipientId);
+      } catch (err) {
+        console.warn("[PostSwapDB] notifyNewDm: recipient lookup failed", err);
+      }
+    }
+
+    const senderIsOwner =
+      !!(senderId && swap.ownerId && String(senderId) === String(swap.ownerId));
+
+    if (!recipient && !senderIsOwner && swap.ownerId && String(swap.ownerId) !== String(senderId)) {
+      try {
+        recipient = await fetchProfile(swap.ownerId);
       } catch (err) {
         console.warn("[PostSwapDB] notifyNewDm: owner lookup failed", err);
       }
     }
 
-    // Fallback: match by username label (demo accounts)
-    if (!owner && swap.username) {
+    // Fallback: match by username label when the sender is not the listing owner
+    if (!recipient && !senderIsOwner && swap.username) {
       try {
         const all = await fetchAllProfiles();
-        owner = all.find(
+        recipient = all.find(
           (p) =>
             p.name &&
             swap.username &&
@@ -789,13 +993,13 @@
       } catch (_) { /* ignore */ }
     }
 
-    if (!owner || !wantsEmail(owner, "new_dm")) {
-      console.log("[PostSwapDB] notifyNewDm: no recipient or prefs off", owner);
+    if (!recipient || !wantsEmail(recipient, "new_dm")) {
+      console.log("[PostSwapDB] notifyNewDm: no recipient or prefs off", recipient);
       return { queued: 0, reason: "no_recipient_or_prefs" };
     }
 
     // Don't email yourself
-    if (fromUser && String(owner.id) === String(fromUser.id || fromUser)) {
+    if (senderId && String(recipient.id) === String(senderId)) {
       console.log("[PostSwapDB] notifyNewDm: skip self");
       return { queued: 0, reason: "self" };
     }
@@ -804,9 +1008,9 @@
     const fromName = (fromUser && fromUser.name) || "A verified carrier";
     const subject = `New PostSwap DM on ${route}`;
     const body = [
-      `Hi ${owner.name || "Carrier"},`,
+      `Hi ${recipient.name || "Carrier"},`,
       "",
-      `${fromName} sent you a message about your swap:`,
+      `${fromName} sent you a message about a swap:`,
       route,
       "",
       `Message:`,
@@ -819,19 +1023,19 @@
     ].join("\n");
 
     const row = await queueEmail({
-      toEmail: owner.email,
-      toUserId: owner.id,
+      toEmail: recipient.email,
+      toUserId: recipient.id,
       subject,
       body,
       eventType: "new_dm",
       meta: {
         swap_id: swap.id,
-        from_user_id: fromUser && (fromUser.id || fromUser),
+        from_user_id: senderId || null,
       },
     });
 
     const dispatch = await dispatchEmailQueue();
-    return { queued: 1, row, dispatch, to: owner.email };
+    return { queued: 1, row, dispatch, to: recipient.email };
   }
 
   function normalizeCraft(craft) {
@@ -1064,12 +1268,15 @@
     try {
       const msgRes = await fetch(msgUrl, {
         method: "POST",
-        headers: {
-          apikey: SUPABASE_ANON_KEY,
-          Authorization: "Bearer " + SUPABASE_ANON_KEY,
-          "Content-Type": "application/json",
-          Prefer: "return=representation",
-        },
+        headers: Object.assign(
+          {
+            apikey: SUPABASE_ANON_KEY,
+            Authorization: "Bearer " + SUPABASE_ANON_KEY,
+            "Content-Type": "application/json",
+            Prefer: "return=representation",
+          },
+          participantKeysHeader(["probe"])
+        ),
         body: JSON.stringify(msgPayload),
       });
       const msgText = await msgRes.text();
@@ -1094,7 +1301,7 @@
           body: msgData,
           hint:
             msgRes.status === 401 || msgRes.status === 403
-              ? 'RLS/auth blocked INSERT — disable RLS on public."messages (for DMs)"'
+              ? 'RLS blocked INSERT — from_user must be listed in the x-postswap-keys header (see supabase-schema.sql).'
               : "See body for details",
         };
         console.error("[PostSwapDB] messages INSERT FAILED", results.messages);
@@ -1150,11 +1357,18 @@
     SUPABASE_URL: SUPABASE_URL,
     fetchSwaps: fetchSwaps,
     createSwap: createSwap,
+    messagesTable: MESSAGES_TABLE,
     fetchMessages: fetchMessages,
     fetchMessagesForUser: fetchMessagesForUser,
     fetchAllMessages: fetchAllMessages,
+    fetchDmReadIds: fetchDmReadIds,
+    saveDmReadIds: saveDmReadIds,
     fetchEmailQueueForUser: fetchEmailQueueForUser,
     userIdentityKeys: userIdentityKeys,
+    indexProfiles: indexProfiles,
+    looksLikeRawId: looksLikeRawId,
+    displayNameFor: displayNameFor,
+    conversationKey: conversationKey,
     sendMessage: sendMessage,
     fetchProfile: fetchProfile,
     fetchProfileByEmail: fetchProfileByEmail,

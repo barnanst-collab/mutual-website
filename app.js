@@ -36,6 +36,10 @@
   let nearMeCenter = null;
   const NEAR_ME_MILES = 150;
   let currentDmSwap = null;
+  let currentDmAddressId = null;
+  let currentDmSig = "";
+  let profileIndex = new Map();
+  let profileIndexAt = 0;
   let user = null; // full profile + notification prefs
   let useSupabase = typeof window.PostSwapDB !== "undefined";
   let swapsLoaded = false;
@@ -165,7 +169,17 @@
     inboxThreadSub: $("#inbox-thread-sub"),
     inboxThreadMessages: $("#inbox-thread-messages"),
     inboxOpenDm: $("#inbox-open-dm"),
+    inboxBack: $("#inbox-back"),
     inboxRefresh: $("#inbox-refresh"),
+    formInboxReply: $("#form-inbox-reply"),
+    inboxReplyInput: $("#inbox-reply-input"),
+    inboxReplySend: $("#inbox-reply-send"),
+    inboxSendError: $("#inbox-send-error"),
+    inboxSendErrorText: $("#inbox-send-error-text"),
+    inboxSendRetry: $("#inbox-send-retry"),
+    dmSendError: $("#dm-send-error"),
+    dmSendErrorText: $("#dm-send-error-text"),
+    dmSendRetry: $("#dm-send-retry"),
     shareMessage: $("#share-message"),
     shareCopyMsg: $("#share-copy-msg"),
     shareCopyLink: $("#share-copy-link"),
@@ -337,32 +351,104 @@
   }
 
   // ---------- In-app mailbox (real activity only) ----------
-  // Only stores which notification IDs the user has read — no demo content.
-  const MAIL_READ_KEY = "postswap_mailbox_read_ids";
-  // Clear legacy demo mailbox payload if present
+  // Read ids are stored per account. Legacy demo mailbox payload is discarded.
+  const MAIL_READ_LEGACY_KEY = "postswap_mailbox_read_ids";
   try {
     localStorage.removeItem("postswap_mailbox");
   } catch (_) { /* ignore */ }
 
   let mailItems = [];
-  let mailReadIds = loadMailReadIds();
+  let mailReadIds = new Set();
   let mailboxLoading = false;
+  let readSyncTimer = null;
+
+  function readStorageKey() {
+    if (!user || (!user.id && !user.email)) return null;
+    return "postswap_dm_read:" + String(user.id || user.email);
+  }
 
   function loadMailReadIds() {
+    mailReadIds = new Set();
+    const key = readStorageKey();
+    if (!key) return;
     try {
-      const raw = localStorage.getItem(MAIL_READ_KEY);
+      const raw = localStorage.getItem(key);
       if (raw) {
         const arr = JSON.parse(raw);
-        if (Array.isArray(arr)) return new Set(arr.map(String));
+        if (Array.isArray(arr)) {
+          arr.forEach(function (id) {
+            mailReadIds.add(String(id));
+          });
+        }
       }
     } catch (_) { /* ignore */ }
-    return new Set();
+    // Move the old shared list onto this account once, then drop it
+    // so the next person on this browser does not inherit those reads.
+    if (mailReadIds.size === 0) {
+      try {
+        const legacy = localStorage.getItem(MAIL_READ_LEGACY_KEY);
+        if (legacy) {
+          const arr = JSON.parse(legacy);
+          if (Array.isArray(arr)) {
+            arr.forEach(function (id) {
+              mailReadIds.add(String(id));
+            });
+          }
+          localStorage.removeItem(MAIL_READ_LEGACY_KEY);
+          saveMailReadIdsLocal();
+        }
+      } catch (_) { /* ignore */ }
+    }
+  }
+
+  function saveMailReadIdsLocal() {
+    const key = readStorageKey();
+    if (!key) return;
+    try {
+      localStorage.setItem(key, JSON.stringify(Array.from(mailReadIds).slice(-400)));
+    } catch (_) { /* ignore */ }
   }
 
   function saveMailReadIds() {
+    saveMailReadIdsLocal();
+    if (readSyncTimer) clearTimeout(readSyncTimer);
+    readSyncTimer = setTimeout(pushReadIdsToServer, 700);
+  }
+
+  async function pushReadIdsToServer() {
+    if (!user || !user.id || !useSupabase || !db() || typeof db().saveDmReadIds !== "function") return;
     try {
-      localStorage.setItem(MAIL_READ_KEY, JSON.stringify(Array.from(mailReadIds)));
-    } catch (_) { /* ignore */ }
+      await db().saveDmReadIds(user.id, Array.from(mailReadIds));
+    } catch (err) {
+      console.warn("[PostSwap] read-state sync failed", err);
+    }
+  }
+
+  async function hydrateServerReadIds() {
+    if (!user || !user.id || !useSupabase || !db() || typeof db().fetchDmReadIds !== "function") return;
+    let remote = null;
+    try {
+      remote = await db().fetchDmReadIds(user.id);
+    } catch (err) {
+      console.warn("[PostSwap] read-state load failed", err);
+      return;
+    }
+    if (!Array.isArray(remote)) return;
+    let changed = false;
+    remote.forEach(function (id) {
+      const key = String(id);
+      if (!mailReadIds.has(key)) {
+        mailReadIds.add(key);
+        changed = true;
+      }
+    });
+    if (changed) {
+      saveMailReadIdsLocal();
+      refreshMailboxFromDb();
+      if (els.modalInbox && !els.modalInbox.hidden && inboxThreads.length) {
+        renderInboxThreadList();
+      }
+    }
   }
 
   function unreadCount() {
@@ -415,43 +501,34 @@
     renderMailbox();
 
     const items = [];
-    const identity = (
-      db() && typeof db().userIdentityKeys === "function"
-        ? db().userIdentityKeys(user)
-        : [user.id, user.email, user.name]
-    ).map(function (k) {
-      return String(k || "").toLowerCase();
-    });
 
-    // 1) Real DMs
+    // 1) Real DMs — one notification per (swap + other person)
     if (useSupabase && db() && typeof db().fetchMessagesForUser === "function") {
       try {
+        await ensureProfileIndex();
         const msgs = await db().fetchMessagesForUser(user, 80);
-        // One notification per swap thread (latest message)
-        const bySwap = new Map();
+        const byThread = new Map();
         (msgs || []).forEach(function (m) {
-          const key = String(m.swapId);
-          const prev = bySwap.get(key);
+          const swap = findSwapById(m.swapId);
+          const info = threadInfoFor(m, swap);
+          const prev = byThread.get(info.key);
           if (!prev || new Date(m.createdAt || 0) > new Date(prev.createdAt || 0)) {
-            bySwap.set(key, m);
+            byThread.set(info.key, { message: m, info: info, swap: swap });
           }
         });
 
-        bySwap.forEach(function (m) {
-          const fromMe =
-            identity.indexOf(String(m.senderId || "").toLowerCase()) !== -1;
-          const swap = findSwapById(m.swapId);
+        byThread.forEach(function (entry) {
+          const m = entry.message;
+          const info = entry.info;
+          const swap = entry.swap;
+          const fromMe = info.fromMe;
           const route = swap
             ? swap.current + " → " + swap.desired
-            : "Swap #" + m.swapId;
-          const who = fromMe
-            ? "You"
-            : m.senderId && String(m.senderId).length < 40
-              ? String(m.senderId)
-              : "A carrier";
+            : swapTitle(null, m.swapId);
+          const peer = partyName(info.otherRaw || info.addressId, swap);
           const text = fromMe
-            ? "You messaged about " + route
-            : "New message from " + who + " · " + route;
+            ? "You messaged " + peer + " · " + route
+            : "New message from " + peer + " · " + route;
           const nid = "dm-" + String(m.id);
           items.push({
             id: nid,
@@ -462,6 +539,7 @@
             createdAt: m.createdAt,
             unread: !mailReadIds.has(nid),
             swapId: m.swapId,
+            threadKey: info.key,
             action: "dm",
           });
         });
@@ -660,18 +738,12 @@
     });
     markOneMailRead(id);
     if (!item) return;
-    if (item.swapId && item.action === "dm") {
+    if (item.swapId && (item.action === "dm" || item.action === "email")) {
       setMailboxOpen(false);
-      const swap = findSwapById(item.swapId);
-      if (swap) {
-        if (user && idEq(swap.ownerId, user.id)) {
-          openInbox();
-        } else {
-          openDm(swap);
-        }
-      } else {
-        openInbox();
-      }
+      openInbox({
+        threadKey: item.threadKey || null,
+        swapId: item.swapId,
+      });
     } else if (item.action === "email") {
       setMailboxOpen(false);
       openInbox();
@@ -720,8 +792,10 @@
       (user.name.split(" ")[1] ? " " + user.name.split(" ")[1][0] + "." : "");
     updateMobileAuth();
     updateGuestParticipateBanner();
+    loadMailReadIds();
     renderMailbox();
     refreshMailboxFromDb();
+    hydrateServerReadIds();
     if (swapsLoaded) refreshViews();
 
     if (!skipRemote) {
@@ -754,6 +828,9 @@
     updateMobileAuth();
     updateGuestParticipateBanner();
     mailItems = [];
+    mailReadIds = new Set();
+    if (readSyncTimer) clearTimeout(readSyncTimer);
+    stopMessagePoll();
     renderMailbox();
     if (swapsLoaded) refreshViews();
     showToast(
@@ -1245,8 +1322,18 @@
         }
         ${s.notes ? `<div class="popup-note">“${escapeHtml(s.notes)}”</div>` : ""}
         <div class="popup-actions">
-          <button type="button" class="btn btn-primary" data-dm-id="${s.id}">
-            ${user ? "Send DM" : "Sign up to DM"}
+          <button type="button" class="btn btn-primary" ${
+            userOwnsSwap(s)
+              ? `data-view-listing="${s.id}"`
+              : `data-dm-id="${s.id}"`
+          }>
+            ${
+              userOwnsSwap(s)
+                ? "View listing"
+                : user
+                  ? "Send DM"
+                  : "Sign up to DM"
+            }
           </button>
           ${shareButtonHtml(s)}
         </div>
@@ -1305,6 +1392,14 @@
             ev.preventDefault();
             ev.stopPropagation();
             openDm(s);
+          });
+        }
+        const viewBtn = root.querySelector(`[data-view-listing="${s.id}"]`);
+        if (viewBtn) {
+          viewBtn.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            openMySwaps(s.id);
           });
         }
         const shareBtn = root.querySelector(`[data-share-id="${s.id}"]`);
@@ -1376,7 +1471,7 @@
 
     els.swapList.innerHTML = filtered
       .map((s) => {
-        const isMine = user && idEq(s.ownerId, user.id);
+        const isMine = userOwnsSwap(s);
         return `
         <article class="swap-card${idEq(s.id, activeSwapId) ? " active" : ""}${isMine ? " mine" : ""}${s.justAdded ? " just-added" : ""}" data-id="${s.id}" tabindex="0">
           <div class="swap-card-top">
@@ -1398,7 +1493,9 @@
           </div>
           <div class="swap-privacy">${isMine ? "Your listing • visible to carriers" : escapeHtml(s.privacyLabel)}</div>
           <div class="swap-card-actions">
-            <button type="button" class="btn btn-primary" data-dm-id="${s.id}">
+            <button type="button" class="btn btn-primary" ${
+              isMine ? `data-view-listing="${s.id}"` : `data-dm-id="${s.id}"`
+            }>
               ${
                 isMine
                   ? "View listing"
@@ -1626,12 +1723,209 @@
   }
 
   // ---------- My Messages inbox ----------
-  let inboxThreads = []; // { swapId, swap, messages, lastAt, preview }
-  let activeInboxSwapId = null;
+  let inboxThreads = [];
+  let activeInboxThreadKey = null;
+  let pendingInboxThreadKey = null;
+  let pendingInboxSwapId = null;
+  let currentDmThreadKey = null;
+  const MESSAGE_POLL_MS = 18000;
+  let messagePollTimer = null;
+  let messagePollInFlight = false;
 
-  function swapLabel(s) {
-    if (!s) return "Unknown swap";
-    return `${s.current || "?"} → ${s.desired || "?"}`;
+  function currentIdentityKeys() {
+    if (!user) return [];
+    if (db() && typeof db().userIdentityKeys === "function") return db().userIdentityKeys(user);
+    return [user.id, user.email, user.name, user.username].filter(Boolean);
+  }
+
+  function currentIdentitySet() {
+    const set = Object.create(null);
+    currentIdentityKeys().forEach(function (k) {
+      if (k == null || k === "") return;
+      set[String(k).toLowerCase()] = true;
+    });
+    return set;
+  }
+
+  function identityHas(set, value) {
+    if (value == null || value === "") return false;
+    return !!set[String(value).toLowerCase()];
+  }
+
+  function isSelfAddress(addressId) {
+    if (!user || addressId == null || addressId === "") return false;
+    const set = Object.create(null);
+    [user.id, user.user_id, user.email, user.name, user.username].forEach(function (k) {
+      if (k == null || k === "") return;
+      set[String(k).toLowerCase()] = true;
+    });
+    return !!set[String(addressId).toLowerCase()];
+  }
+
+  function userOwnsSwap(swap) {
+    if (!user || !swap) return false;
+    const set = Object.create(null);
+    [user.id, user.user_id, user.email, user.name, user.username].forEach(function (k) {
+      if (k == null || k === "") return;
+      set[String(k).toLowerCase()] = true;
+    });
+    if (user.name) {
+      const first = String(user.name).split(/\s+/)[0];
+      const state = user.state || "";
+      if (state) set[(first + " • " + state).toLowerCase()] = true;
+      set[(first + " • US").toLowerCase()] = true;
+    }
+    return identityHas(set, swap.ownerId) || identityHas(set, swap.username);
+  }
+
+  function displayNameFor(raw) {
+    if (db() && typeof db().displayNameFor === "function") {
+      return db().displayNameFor(raw, profileIndex);
+    }
+    const s = String(raw || "").trim();
+    if (!s || /^verified carrier$/i.test(s)) return "Carrier";
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return "Carrier";
+    if (s.indexOf("@") !== -1) {
+      const local = s.split("@")[0].replace(/[._]+/g, " ").trim();
+      return local || s;
+    }
+    return s;
+  }
+
+  /** Name for the other person or a message sender. Profile first, then from_user. */
+  function partyName(raw, swap) {
+    const direct = displayNameFor(raw);
+    if (direct && direct !== "Carrier") return direct;
+    if (swap && raw && (idEq(raw, swap.ownerId) || idEq(raw, swap.username))) {
+      const viaUsername = displayNameFor(swap.username);
+      if (viaUsername && viaUsername !== "Carrier") return viaUsername;
+      const viaOwner = displayNameFor(swap.ownerId);
+      if (viaOwner && viaOwner !== "Carrier" && !idEq(viaOwner, raw)) return viaOwner;
+    }
+    return direct || "Carrier";
+  }
+
+  function messageSenderLabel(message, swap) {
+    const info = threadInfoFor(message, swap);
+    if (info.fromMe) return "You";
+    return partyName(message && message.senderId, swap);
+  }
+
+  function swapTitle(swap, swapId) {
+    if (swap && (swap.current || swap.desired)) {
+      return (swap.current || "?") + " → " + (swap.desired || "?");
+    }
+    if (db() && typeof db().looksLikeRawId === "function" && db().looksLikeRawId(swapId)) {
+      return "Swap conversation";
+    }
+    if (swapId == null || swapId === "") return "Swap conversation";
+    return "Swap #" + swapId;
+  }
+
+  function threadInfoFor(message, swap) {
+    if (db() && typeof db().conversationKey === "function") {
+      return db().conversationKey(message, user, swap || null, profileIndex);
+    }
+    return {
+      key: String(message && message.swapId) + "::unknown",
+      otherRaw: "",
+      addressId: "",
+      fromMe: false,
+    };
+  }
+
+  async function ensureProfileIndex(force) {
+    if (!force && profileIndex && profileIndexAt && Date.now() - profileIndexAt < 60000) {
+      return profileIndex;
+    }
+    let profiles = [];
+    if (useSupabase && db() && typeof db().fetchAllProfiles === "function") {
+      try {
+        profiles = await db().fetchAllProfiles();
+      } catch (err) {
+        console.warn("[PostSwap] profile index failed", err);
+      }
+    }
+    const list = (profiles || []).slice();
+    if (user) list.unshift(user);
+    if (db() && typeof db().indexProfiles === "function") {
+      profileIndex = db().indexProfiles(list);
+    } else if (!profileIndex) {
+      profileIndex = new Map();
+    }
+    profileIndexAt = Date.now();
+    return profileIndex;
+  }
+
+  function isFacebookInAppBrowser() {
+    const ua = String((navigator && navigator.userAgent) || "");
+    return /FBAN|FBAV|FB_IAB|FBIOS|FB4A|Instagram|MessengerForiOS|Orca/i.test(ua);
+  }
+
+  function inboxIsCompact() {
+    const narrow = window.matchMedia && window.matchMedia("(max-width: 760px)").matches;
+    return !!narrow || isFacebookInAppBrowser();
+  }
+
+  function syncInboxMode() {
+    if (!els.modalInbox) return;
+    const compact = inboxIsCompact();
+    els.modalInbox.classList.toggle("inbox-compact", compact);
+    if (!compact) {
+      els.modalInbox.classList.remove("inbox-thread-open");
+    } else if (activeInboxThreadKey && els.inboxThreadPanel && !els.inboxThreadPanel.hidden) {
+      els.modalInbox.classList.add("inbox-thread-open");
+    }
+  }
+
+  function syncChatModalHeight() {
+    const compact = inboxIsCompact();
+    [els.modalInbox, els.modalDm].forEach(function (modal) {
+      if (!modal) return;
+      if (!compact || !window.visualViewport || !window.visualViewport.height) {
+        modal.style.height = "";
+        modal.style.maxHeight = "";
+        return;
+      }
+      const px = Math.max(280, Math.min(560, Math.round(window.visualViewport.height - 16)));
+      modal.style.height = px + "px";
+      modal.style.maxHeight = px + "px";
+    });
+  }
+
+  function messagingModalOpen() {
+    return (els.modalInbox && !els.modalInbox.hidden) || (els.modalDm && !els.modalDm.hidden);
+  }
+
+  function startMessagePoll() {
+    if (messagePollTimer) return;
+    messagePollTimer = setInterval(pollMessages, MESSAGE_POLL_MS);
+  }
+
+  function stopMessagePoll() {
+    if (messagePollTimer) clearInterval(messagePollTimer);
+    messagePollTimer = null;
+  }
+
+  async function pollMessages() {
+    if (!messagingModalOpen() || !user) {
+      stopMessagePoll();
+      return;
+    }
+    if (messagePollInFlight) return;
+    messagePollInFlight = true;
+    try {
+      if (els.modalInbox && !els.modalInbox.hidden) {
+        await loadInboxThreads({ silent: true });
+      }
+      if (els.modalDm && !els.modalDm.hidden && currentDmSwap) {
+        await refreshOpenDm();
+      }
+    } catch (err) {
+      console.warn("[PostSwap] message poll failed", err);
+    } finally {
+      messagePollInFlight = false;
+    }
   }
 
   function formatInboxTime(iso) {
@@ -1644,12 +1938,164 @@
         return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
       }
       return d.toLocaleDateString([], { month: "short", day: "numeric" });
-    } catch {
+    } catch (_) {
       return "";
     }
   }
 
-  async function loadInboxThreads() {
+  function showInboxError(msg) {
+    if (!els.inboxSendError) return;
+    els.inboxSendError.hidden = false;
+    if (els.inboxSendErrorText) els.inboxSendErrorText.textContent = msg;
+  }
+
+  function clearInboxError() {
+    if (!els.inboxSendError) return;
+    els.inboxSendError.hidden = true;
+    if (els.inboxSendErrorText) els.inboxSendErrorText.textContent = "";
+  }
+
+  function showDmError(msg) {
+    if (!els.dmSendError) return;
+    els.dmSendError.hidden = false;
+    if (els.dmSendErrorText) els.dmSendErrorText.textContent = msg;
+  }
+
+  function clearDmError() {
+    if (!els.dmSendError) return;
+    els.dmSendError.hidden = true;
+    if (els.dmSendErrorText) els.dmSendErrorText.textContent = "";
+  }
+
+  function friendlySendError(err) {
+    if (!err) return "Couldn’t send that message.";
+    if (err.isNetwork) return "Network error. Check your connection and retry.";
+    if (err.status === 401 || err.status === 403) {
+      return "The server blocked this message. Retry in a moment.";
+    }
+    return err.message || "Couldn’t send that message.";
+  }
+
+  function filterHistory(messages, swap, addressId, threadKey) {
+    if (!addressId && !threadKey) return messages || [];
+    return (messages || []).filter(function (m) {
+      const info = threadInfoFor(m, swap);
+      if (threadKey && info.key === threadKey) return true;
+      if (addressId && (idEq(info.addressId, addressId) || idEq(info.otherRaw, addressId))) return true;
+      return false;
+    });
+  }
+
+  async function loadThreadHistory(swap, addressId, threadKey) {
+    const canLoad =
+      useSupabase &&
+      db() &&
+      swap &&
+      swap.id != null &&
+      !String(swap.id).startsWith("local-") &&
+      typeof db().fetchMessages === "function" &&
+      user;
+    if (!canLoad) return [];
+    const history = await db().fetchMessages(swap.id, user);
+    return filterHistory(history, swap, addressId, threadKey);
+  }
+
+  function rememberAddress(bucket, info) {
+    if (!info.addressId) return;
+    const looks = db() && typeof db().looksLikeRawId === "function" ? db().looksLikeRawId : function () { return false; };
+    if (!bucket.addressId || (looks(bucket.addressId) && !looks(info.addressId))) {
+      bucket.addressId = info.addressId;
+    }
+    if (info.otherRaw) bucket.otherRaw = info.otherRaw;
+  }
+
+  function markThreadMessagesRead(messages) {
+    let changed = false;
+    (messages || []).forEach(function (m) {
+      if (!m || m.id == null) return;
+      const nid = "dm-" + String(m.id);
+      if (!mailReadIds.has(nid)) {
+        mailReadIds.add(nid);
+        changed = true;
+      }
+    });
+    if (!changed) return;
+    saveMailReadIds();
+    mailItems = mailItems.map(function (n) {
+      return mailReadIds.has(String(n.id)) ? Object.assign({}, n, { unread: false }) : n;
+    });
+    renderMailbox();
+  }
+
+  async function deliverMessage(swap, addressId, text) {
+    if (!user) throw new Error("Sign in to send a message.");
+    if (!useSupabase || !db() || typeof db().sendMessage !== "function") {
+      throw new Error("Messaging isn’t available right now.");
+    }
+    if (!swap || swap.id == null || String(swap.id).startsWith("local-")) {
+      throw new Error("This swap isn’t saved on the server yet, so the message can’t be delivered.");
+    }
+    if (!addressId) throw new Error("There’s no recipient on this conversation yet.");
+    if (isSelfAddress(addressId)) {
+      throw new Error("Pick the other carrier’s conversation before replying.");
+    }
+    const saved = await db().sendMessage({
+      swapId: swap.id,
+      senderId: user.id,
+      toUser: addressId,
+      body: text,
+      identityKeys: currentIdentityKeys(),
+    });
+    if (typeof db().notifyNewDm === "function") {
+      try {
+        const notify = await db().notifyNewDm({
+          swap: swap,
+          messageBody: text,
+          fromUser: user,
+          recipientId: addressId,
+        });
+        if (notify && notify.queued > 0) {
+          showToast(
+            "Email notification queued",
+            notify.to
+              ? "DM alert queued for " + notify.to
+              : "They’ll be emailed if notifications are on."
+          );
+        }
+      } catch (notifyErr) {
+        console.warn("[PostSwap] email notify failed", notifyErr);
+      }
+    }
+    refreshMailboxFromDb();
+    return saved;
+  }
+
+  function pendingThreadKey() {
+    if (pendingInboxThreadKey) {
+      const found = inboxThreads.find(function (t) {
+        return t.key === pendingInboxThreadKey;
+      });
+      if (found) {
+        pendingInboxThreadKey = null;
+        pendingInboxSwapId = null;
+        return found.key;
+      }
+    }
+    if (pendingInboxSwapId && !pendingInboxThreadKey) {
+      const found = inboxThreads.find(function (t) {
+        return idEq(t.swapId, pendingInboxSwapId);
+      });
+      if (found) {
+        pendingInboxSwapId = null;
+        return found.key;
+      }
+    }
+    return null;
+  }
+
+  async function loadInboxThreads(opts) {
+    opts = opts || {};
+    const silent = !!opts.silent;
     if (!els.inboxThreads) return;
 
     if (!user) {
@@ -1660,26 +2106,22 @@
       `;
       els.inboxStatus.textContent = "Not signed in";
       inboxThreads = [];
-      activeInboxSwapId = null;
+      activeInboxThreadKey = null;
       showInboxThreadEmpty();
       return;
     }
 
-    els.inboxStatus.textContent = "Loading your messages…";
-    els.inboxThreads.innerHTML = `
-      <div class="inbox-loading">
-        <span class="loading-spinner loading-spinner-sm" aria-hidden="true"></span>
-        Fetching your DMs…
-      </div>
-    `;
+    if (!silent) {
+      els.inboxStatus.textContent = "Loading your messages…";
+      els.inboxThreads.innerHTML = `
+        <div class="inbox-loading">
+          <span class="loading-spinner loading-spinner-sm" aria-hidden="true"></span>
+          Fetching your DMs…
+        </div>
+      `;
+    }
 
-    const canFetchUser =
-      useSupabase &&
-      db() &&
-      (typeof db().fetchMessagesForUser === "function" ||
-        typeof db().fetchAllMessages === "function");
-
-    if (!canFetchUser) {
+    if (!useSupabase || !db() || typeof db().fetchMessagesForUser !== "function") {
       els.inboxThreads.innerHTML = `
         <div class="mailbox-empty">
           <p><strong>Inbox unavailable</strong><br />Supabase messages helper not loaded.</p>
@@ -1690,68 +2132,53 @@
     }
 
     try {
-      // Server-side filter: only rows where from_user / to_user is this user
-      let myMsgs = [];
-      if (typeof db().fetchMessagesForUser === "function") {
-        myMsgs = await db().fetchMessagesForUser(user, 300);
-      } else {
-        // Legacy path — still filter hard on the client
-        const all = await db().fetchAllMessages(300);
-        const keys = (db().userIdentityKeys
-          ? db().userIdentityKeys(user)
-          : [user.id, user.email, user.name]
-        ).map(function (k) {
-          return String(k || "").toLowerCase();
-        });
-        myMsgs = (all || []).filter(function (m) {
-          const from = String(m.senderId || "").toLowerCase();
-          const to = String(m.toUser || "").toLowerCase();
-          return keys.indexOf(from) !== -1 || keys.indexOf(to) !== -1;
-        });
-      }
-
-      // Extra client guard: never show a message the user is not party to
-      const identity = (db().userIdentityKeys
-        ? db().userIdentityKeys(user)
-        : [user.id]
-      ).map(function (k) {
-        return String(k || "").toLowerCase();
-      });
+      await ensureProfileIndex(false);
+      const myMsgs = await db().fetchMessagesForUser(user, 300);
+      const mySet = currentIdentitySet();
       const relevant = (myMsgs || []).filter(function (m) {
-        const from = String(m.senderId || "").toLowerCase();
-        const to = String(m.toUser || "").toLowerCase();
-        return identity.indexOf(from) !== -1 || identity.indexOf(to) !== -1;
+        return identityHas(mySet, m.senderId) || identityHas(mySet, m.toUser);
       });
 
-      console.log("[PostSwap] inbox: user-only messages", {
-        userId: user.id,
-        count: relevant.length,
-      });
-
-      // Group by swapId
-      const bySwap = new Map();
+      const byKey = new Map();
       relevant.forEach(function (m) {
-        const key = String(m.swapId);
-        if (!bySwap.has(key)) bySwap.set(key, []);
-        bySwap.get(key).push(m);
+        const swap = findSwapById(m.swapId);
+        const info = threadInfoFor(m, swap);
+        if (!byKey.has(info.key)) {
+          byKey.set(info.key, {
+            key: info.key,
+            swapId: m.swapId,
+            swap: swap,
+            messages: [],
+            addressId: "",
+            otherRaw: "",
+          });
+        }
+        const bucket = byKey.get(info.key);
+        bucket.messages.push(m);
+        if (!bucket.swap && swap) bucket.swap = swap;
+        rememberAddress(bucket, info);
       });
 
-      inboxThreads = Array.from(bySwap.entries())
-        .map(function (entry) {
-          const swapId = entry[0];
-          const messages = entry[1];
-          const chronological = messages.slice().sort(function (a, b) {
+      inboxThreads = Array.from(byKey.values())
+        .map(function (bucket) {
+          const chronological = bucket.messages.slice().sort(function (a, b) {
             return new Date(a.createdAt || 0) - new Date(b.createdAt || 0);
           });
           const last = chronological[chronological.length - 1];
-          const swap = findSwapById(swapId) || null;
+          const lastInfo = last ? threadInfoFor(last, bucket.swap) : { fromMe: true };
+          const peer = partyName(bucket.otherRaw || bucket.addressId, bucket.swap);
           return {
-            swapId: swapId,
-            swap: swap,
+            key: bucket.key,
+            swapId: bucket.swapId,
+            swap: bucket.swap,
             messages: chronological,
+            addressId: bucket.addressId,
+            otherRaw: bucket.otherRaw,
+            peerName: peer,
             lastAt: last && last.createdAt,
             preview: (last && last.body) || "",
             count: chronological.length,
+            unread: !!(last && !lastInfo.fromMe && !mailReadIds.has("dm-" + String(last.id))),
           };
         })
         .sort(function (a, b) {
@@ -1762,19 +2189,24 @@
       els.inboxStatus.textContent =
         inboxThreads.length === 0
           ? "No messages yet"
-          : inboxThreads.length +
-            " conversation" +
-            (inboxThreads.length === 1 ? "" : "s") +
-            " (only yours)";
+          : inboxThreads.length + " conversation" + (inboxThreads.length === 1 ? "" : "s");
 
-      if (activeInboxSwapId && bySwap.has(String(activeInboxSwapId))) {
-        selectInboxThread(activeInboxSwapId);
-      } else {
-        activeInboxSwapId = null;
+      const wanted = pendingThreadKey();
+      const next = wanted || opts.keepKey || activeInboxThreadKey;
+      if (next && inboxThreads.some(function (t) { return t.key === next; })) {
+        selectInboxThread(next, { reveal: !!wanted || !!opts.reveal });
+      } else if (!silent) {
+        pendingInboxThreadKey = null;
+        pendingInboxSwapId = null;
+        activeInboxThreadKey = null;
         showInboxThreadEmpty();
       }
     } catch (err) {
       console.error("[PostSwap] loadInboxThreads failed", err);
+      if (silent && inboxThreads.length) {
+        els.inboxStatus.textContent = "Couldn’t refresh";
+        return;
+      }
       els.inboxThreads.innerHTML = `
         <div class="mailbox-empty">
           <p><strong>Couldn’t load inbox</strong><br />${escapeHtml(err.message || "Supabase error")}</p>
@@ -1799,18 +2231,19 @@
     }
 
     els.inboxThreads.innerHTML = inboxThreads
-      .map((t) => {
-        const title = t.swap ? swapLabel(t.swap) : `Swap #${escapeHtml(String(t.swapId))}`;
-        const craft = t.swap ? escapeHtml(t.swap.craft || "") : "";
-        const active = idEq(t.swapId, activeInboxSwapId) ? " active" : "";
+      .map(function (t) {
+        const title = swapTitle(t.swap, t.swapId);
+        const active = t.key === activeInboxThreadKey ? " active" : "";
+        const unread = t.unread ? " unread" : "";
+        const peer = t.peerName || "Carrier";
         return `
-        <button type="button" class="inbox-thread-item${active}" data-inbox-swap="${escapeHtml(String(t.swapId))}" role="listitem">
+        <button type="button" class="inbox-thread-item${active}${unread}" data-inbox-thread="${escapeHtml(t.key)}" role="listitem">
           <div class="inbox-thread-item-top">
-            <span class="inbox-thread-route">${escapeHtml(title)}</span>
+            <span class="inbox-thread-route">${t.unread ? '<span class="inbox-unread-dot" aria-hidden="true"></span>' : ""}${escapeHtml(peer)}</span>
             <span class="inbox-thread-time">${escapeHtml(formatInboxTime(t.lastAt))}</span>
           </div>
           <div class="inbox-thread-item-meta">
-            ${craft ? `<span>${craft}</span>` : ""}
+            <span>${escapeHtml(title)}</span>
             <span class="inbox-thread-count">${t.count} msg${t.count === 1 ? "" : "s"}</span>
           </div>
           <p class="inbox-thread-preview">${escapeHtml(t.preview)}</p>
@@ -1823,36 +2256,64 @@
   function showInboxThreadEmpty() {
     if (els.inboxEmptyThread) els.inboxEmptyThread.hidden = false;
     if (els.inboxThreadPanel) els.inboxThreadPanel.hidden = true;
+    if (els.modalInbox) els.modalInbox.classList.remove("inbox-thread-open");
   }
 
-  function selectInboxThread(swapId) {
-    activeInboxSwapId = swapId;
-    const thread = inboxThreads.find((t) => idEq(t.swapId, swapId));
-    renderInboxThreadList();
+  function revealInboxThread() {
+    const panel = els.inboxThreadPanel;
+    if (panel && panel.scrollIntoView) {
+      const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      try {
+        panel.scrollIntoView({ block: "start", behavior: reduce ? "auto" : "smooth" });
+      } catch (_) {
+        try { panel.scrollIntoView(true); } catch (_2) { /* ignore */ }
+      }
+    }
+    if (els.inboxThreadMessages) {
+      els.inboxThreadMessages.scrollTop = els.inboxThreadMessages.scrollHeight;
+    }
+  }
+
+  function selectInboxThread(threadKey, opts) {
+    opts = opts || {};
+    activeInboxThreadKey = threadKey;
+    const thread = inboxThreads.find(function (t) { return t.key === threadKey; });
 
     if (!thread) {
+      renderInboxThreadList();
       showInboxThreadEmpty();
       return;
     }
 
+    markThreadMessagesRead(thread.messages);
+    thread.unread = false;
+    renderInboxThreadList();
+
+    const box = els.inboxThreadMessages;
+    const prevScroll = box ? box.scrollTop : 0;
+    const stick = !box || (box.scrollHeight - box.scrollTop - box.clientHeight < 90);
+
     if (els.inboxEmptyThread) els.inboxEmptyThread.hidden = true;
     if (els.inboxThreadPanel) els.inboxThreadPanel.hidden = false;
+    syncInboxMode();
+    if (inboxIsCompact() && els.modalInbox) els.modalInbox.classList.add("inbox-thread-open");
 
-    const title = thread.swap ? swapLabel(thread.swap) : `Swap #${swapId}`;
-    if (els.inboxThreadTitle) els.inboxThreadTitle.textContent = title;
+    if (els.inboxThreadTitle) els.inboxThreadTitle.textContent = thread.peerName || "Carrier";
     if (els.inboxThreadSub) {
-      els.inboxThreadSub.textContent = thread.swap
-        ? `${thread.swap.craft || "Carrier"} · ${thread.count} messages`
-        : `${thread.count} messages`;
+      const route = swapTitle(thread.swap, thread.swapId);
+      const craft = thread.swap && thread.swap.craft ? thread.swap.craft + " · " : "";
+      els.inboxThreadSub.textContent = craft + route + " · " + thread.count + " message" + (thread.count === 1 ? "" : "s");
     }
 
-    const myId = user ? user.id : "guest";
     if (els.inboxThreadMessages) {
-      els.inboxThreadMessages.innerHTML = thread.messages
-        .map((m) => {
-          const who = idEq(m.senderId, myId) ? "me" : "them";
-          const label = who === "me" ? "You" : m.senderId || "Carrier";
-          return `
+      if (!thread.messages.length) {
+        els.inboxThreadMessages.innerHTML = '<div class="inbox-msg-empty">No messages yet.</div>';
+      } else {
+        els.inboxThreadMessages.innerHTML = thread.messages
+          .map(function (m) {
+            const who = threadInfoFor(m, thread.swap).fromMe ? "me" : "them";
+            const label = messageSenderLabel(m, thread.swap);
+            return `
           <div class="inbox-msg ${who}">
             <div class="inbox-msg-meta">
               <span>${escapeHtml(label)}</span>
@@ -1861,13 +2322,84 @@
             <div class="inbox-msg-body">${escapeHtml(m.body)}</div>
           </div>
         `;
-        })
-        .join("");
-      els.inboxThreadMessages.scrollTop = els.inboxThreadMessages.scrollHeight;
+          })
+          .join("");
+      }
+      if (opts.reveal || stick) {
+        els.inboxThreadMessages.scrollTop = els.inboxThreadMessages.scrollHeight;
+      } else {
+        els.inboxThreadMessages.scrollTop = prevScroll;
+      }
+    }
+
+    if (opts.reveal) {
+      revealInboxThread();
+      syncChatModalHeight();
+      if (els.inboxReplyInput) els.inboxReplyInput.focus();
     }
   }
 
-  async function openInbox() {
+  function inboxBackToList() {
+    if (els.modalInbox) els.modalInbox.classList.remove("inbox-thread-open");
+    if (els.inboxThreads && els.inboxThreads.scrollIntoView) {
+      try { els.inboxThreads.scrollIntoView({ block: "nearest" }); } catch (_) { /* ignore */ }
+    }
+  }
+
+  async function sendInboxReply(e) {
+    if (e) e.preventDefault();
+    if (!requireAuth("Sign up free to send DMs to other carriers.")) return;
+    const thread = inboxThreads.find(function (t) { return t.key === activeInboxThreadKey; });
+    const text = els.inboxReplyInput ? els.inboxReplyInput.value.trim() : "";
+    if (!thread) return;
+    if (!text) {
+      showInboxError("Type a message, then send or retry.");
+      return;
+    }
+    clearInboxError();
+    const swap = thread.swap || findSwapById(thread.swapId) || {
+      id: thread.swapId,
+      current: "",
+      desired: "",
+    };
+    setButtonLoading(els.inboxReplySend, true);
+    try {
+      const saved = await deliverMessage(swap, thread.addressId, text);
+      if (els.inboxReplyInput) els.inboxReplyInput.value = "";
+      await loadInboxThreads({ silent: true, keepKey: thread.key, reveal: false });
+      const still = inboxThreads.find(function (t) { return t.key === thread.key; });
+      if (
+        still &&
+        saved &&
+        saved.id != null &&
+        !still.messages.some(function (m) { return idEq(m.id, saved.id); })
+      ) {
+        still.messages.push({
+          id: saved.id,
+          swapId: saved.swapId || swap.id,
+          senderId: saved.senderId || user.id,
+          toUser: saved.toUser || thread.addressId,
+          body: saved.body || text,
+          createdAt: saved.createdAt || new Date().toISOString(),
+        });
+        still.count = still.messages.length;
+        still.preview = saved.body || text;
+        still.lastAt = saved.createdAt || still.lastAt;
+      }
+      if (still) selectInboxThread(still.key, { reveal: false });
+      if (els.inboxThreadMessages) {
+        els.inboxThreadMessages.scrollTop = els.inboxThreadMessages.scrollHeight;
+      }
+    } catch (err) {
+      console.error("[PostSwap] inbox reply failed", err);
+      showInboxError(friendlySendError(err));
+    } finally {
+      setButtonLoading(els.inboxReplySend, false);
+    }
+  }
+
+  async function openInbox(opts) {
+    opts = opts || {};
     if (
       !requireAuth(
         "Sign up free to open My Messages — only your DMs, private to you."
@@ -1875,11 +2407,17 @@
     ) {
       return;
     }
+    if (opts.threadKey) pendingInboxThreadKey = String(opts.threadKey);
+    if (opts.swapId) pendingInboxSwapId = String(opts.swapId);
     setMailboxOpen(false);
     closeMobileMenu();
+    syncInboxMode();
     openModal(els.modalInbox);
-    await loadInboxThreads();
+    syncChatModalHeight();
+    startMessagePoll();
+    await loadInboxThreads({ reveal: !!(opts.threadKey || opts.swapId) });
   }
+
 
   let shareSwap = null;
   let shareMode = "swap"; // "swap" | "site"
@@ -1998,14 +2536,30 @@
     els.overlay.hidden = false;
     modal.hidden = false;
     document.body.classList.add("modal-open");
-    // Focus first input
-    const focusable = modal.querySelector("input, select, textarea, button:not(.modal-close)");
+    const focusable = firstFocusable(modal);
     if (focusable) setTimeout(() => focusable.focus(), 50);
+  }
+
+  function firstFocusable(root) {
+    const nodes = root.querySelectorAll("input, select, textarea, button:not(.modal-close)");
+    for (let i = 0; i < nodes.length; i++) {
+      const el = nodes[i];
+      if (el.disabled || el.closest("[hidden]")) continue;
+      return el;
+    }
+    return null;
   }
 
   function closeAllModals(hideOverlay = true) {
     allModals().forEach((m) => {
       if (m) m.hidden = true;
+    });
+    stopMessagePoll();
+    if (els.modalInbox) els.modalInbox.classList.remove("inbox-thread-open");
+    [els.modalInbox, els.modalDm].forEach(function (modal) {
+      if (!modal) return;
+      modal.style.height = "";
+      modal.style.maxHeight = "";
     });
     if (hideOverlay) {
       els.overlay.hidden = true;
@@ -2054,13 +2608,15 @@
     openModal(els.modalRegister);
   }
 
-  function openMySwaps() {
+  function openMySwaps(focusId) {
     if (
       !requireAuth("Sign up free to manage your posted swaps.")
     ) {
       return;
     }
-    const mine = swaps.filter((s) => idEq(s.ownerId, user.id));
+    const mine = swaps.filter(function (s) {
+      return userOwnsSwap(s);
+    });
     if (!mine.length) {
       els.mySwapsBody.innerHTML = `
         <div class="my-swaps-empty">
@@ -2071,25 +2627,42 @@
       `;
     } else {
       els.mySwapsBody.innerHTML = mine
-        .map(
-          (s) => `
-        <div class="my-swap-item">
+        .map(function (s) {
+          const current = focusId != null && idEq(s.id, focusId);
+          return `
+        <div class="my-swap-item${current ? " is-current" : ""}" data-my-swap="${escapeHtml(String(s.id))}">
           <h4>${escapeHtml(s.current)} → ${escapeHtml(s.desired)}</h4>
           <p>${escapeHtml(s.craft)} · ${formatSeniority(s.seniority)} · ${escapeHtml(s.swapType)}</p>
           ${s.notes ? `<p style="margin-top:0.4rem;font-style:italic">“${escapeHtml(s.notes)}”</p>` : ""}
+          <p style="margin-top:0.45rem">Your listing. Replies from carriers are in My Messages.</p>
         </div>
-      `
-        )
+      `;
+        })
         .join("");
     }
     openModal(els.modalMySwaps);
+    if (focusId != null && els.mySwapsBody) {
+      const sel = '[data-my-swap="' + (CSS.escape ? CSS.escape(String(focusId)) : String(focusId)) + '"]';
+      const node = els.mySwapsBody.querySelector(sel);
+      if (node && node.scrollIntoView) {
+        setTimeout(function () {
+          node.scrollIntoView({ block: "nearest" });
+        }, 60);
+      }
+    }
   }
 
   // ---------- DM ----------
   function appendChatMessage(who, text, time) {
+    const empty = els.chatBody && els.chatBody.querySelector(".chat-empty");
+    if (empty) empty.remove();
     const msg = document.createElement("div");
     msg.className = `chat-msg ${who}`;
-    msg.innerHTML = `${escapeHtml(text)}<span class="msg-time">${time || timeNow()}</span>`;
+    const label = who === "me" ? "You" : (els.dmTitle ? els.dmTitle.textContent : "") || "Carrier";
+    msg.innerHTML =
+      '<span class="msg-who">' + escapeHtml(label) + "</span>" +
+      escapeHtml(text) +
+      '<span class="msg-time">' + (time || timeNow()) + "</span>";
     els.chatBody.appendChild(msg);
     els.chatBody.scrollTop = els.chatBody.scrollHeight;
   }
@@ -2098,12 +2671,70 @@
     if (!iso) return timeNow();
     try {
       return new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    } catch {
+    } catch (_) {
       return timeNow();
     }
   }
 
-  async function openDm(swap) {
+  function renderDmHistory(history, stickToBottom) {
+    if (!els.chatBody) return;
+    if (!history || !history.length) {
+      els.chatBody.innerHTML = '<div class="chat-empty">No messages yet.</div>';
+      return;
+    }
+    const prev = els.chatBody.scrollTop;
+    els.chatBody.innerHTML = history
+      .map(function (m) {
+        const info = threadInfoFor(m, currentDmSwap);
+        const who = info.fromMe ? "me" : "them";
+        const label = messageSenderLabel(m, currentDmSwap);
+        return (
+          '<div class="chat-msg ' + who + '">' +
+          '<span class="msg-who">' + escapeHtml(label) + "</span>" +
+          escapeHtml(m.body) +
+          '<span class="msg-time">' +
+          escapeHtml(formatMsgTime(m.createdAt)) +
+          "</span></div>"
+        );
+      })
+      .join("");
+    if (stickToBottom !== false) {
+      els.chatBody.scrollTop = els.chatBody.scrollHeight;
+    } else {
+      els.chatBody.scrollTop = prev;
+    }
+  }
+
+  async function refreshOpenDm() {
+    if (!currentDmSwap || !els.modalDm || els.modalDm.hidden || !user) return;
+    const nearBottom = !els.chatBody ||
+      (els.chatBody.scrollHeight - els.chatBody.scrollTop - els.chatBody.clientHeight < 90);
+    const history = await loadThreadHistory(currentDmSwap, currentDmAddressId, currentDmThreadKey);
+    const ids = history.map(function (m) { return String(m.id); });
+    const sig = ids.join(",");
+    if (sig === currentDmSig) return;
+    const known = currentDmSig ? currentDmSig.split(",").filter(Boolean) : [];
+    const missing = known.filter(function (id) { return ids.indexOf(id) === -1; });
+    if (missing.length) return;
+    currentDmSig = sig;
+    renderDmHistory(history, nearBottom);
+  }
+
+  function applyDmHeading(swap, addressId, peerName) {
+    const hinted = String(peerName || "").trim();
+    const hintedOk = hinted && hinted !== "Carrier" && !/^verified carrier$/i.test(hinted);
+    const resolved = partyName(addressId, swap);
+    const label = hintedOk ? hinted : (addressId ? (resolved || "Carrier") : "Conversation");
+    if (els.dmTitle) els.dmTitle.textContent = label;
+    if (els.dmSubtitle) els.dmSubtitle.textContent = swapTitle(swap, swap && swap.id);
+    if (els.dmAvatar) {
+      const letters = initials(label || "C");
+      els.dmAvatar.textContent = letters || "C";
+    }
+  }
+
+  async function openDm(swap, opts) {
+    opts = opts || {};
     if (
       !requireAuth(
         "Sign up free to message carriers about swaps. Browsing open listings stays public."
@@ -2111,187 +2742,117 @@
     ) {
       return;
     }
+    if (!swap) return;
 
-    if (user && idEq(swap.ownerId, user.id)) {
-      showToast("That's your swap", "Other carriers will message you when they're interested.");
-      return;
-    }
-
+    await ensureProfileIndex(false);
     currentDmSwap = swap;
-    const parts = (swap.privacyLabel || "").split("•").map((p) => p.trim());
-    els.dmTitle.textContent = parts[0] || "Verified Carrier";
-    els.dmSubtitle.textContent = parts[1] || swap.region || "";
-    els.dmAvatar.textContent = "VC";
-
-    els.chatBody.innerHTML = `
-      <div class="chat-msg them" style="opacity:0.75">
-        Loading conversation…
-        <span class="msg-time"></span>
-      </div>
-    `;
-    els.dmInput.value = `Hi — I'm interested in a mutual swap (${swap.desired} ↔ ${swap.current}). Would you be open to chatting about timelines and eReassign?`;
-    openModal(els.modalDm);
-
-    let history = [];
-    // Remote swaps use numeric Supabase ids (or UUIDs if upgraded)
-    const canLoadRemote =
-      useSupabase &&
-      db() &&
-      swap.id != null &&
-      !String(swap.id).startsWith("local-");
-
-    if (canLoadRemote) {
-      try {
-        // Only load messages this user is party to (from_user / to_user)
-        history = await db().fetchMessages(swap.id, user || null);
-      } catch (err) {
-        console.warn("Could not load messages:", err);
+    currentDmThreadKey = opts.threadKey || null;
+    if (opts.addressId) {
+      currentDmAddressId = opts.addressId;
+    } else {
+      const raw = swap.ownerId || swap.username || "";
+      const synthetic = {
+        swapId: swap.id,
+        senderId: user ? user.id : "",
+        toUser: raw,
+        body: "",
+      };
+      const info = threadInfoFor(synthetic, swap);
+      const candidate = info.addressId || raw || "";
+      if (candidate && !isSelfAddress(candidate)) {
+        currentDmAddressId = candidate;
+        if (!currentDmThreadKey) currentDmThreadKey = info.key;
+      } else {
+        currentDmAddressId = null;
       }
     }
 
-    // Client guard: drop any row that isn't clearly from/to this user
-    if (history.length && user) {
-      const keys = (
-        db() && typeof db().userIdentityKeys === "function"
-          ? db().userIdentityKeys(user)
-          : [user.id, user.email, user.name]
-      ).map(function (k) {
-        return String(k || "").toLowerCase();
-      });
-      history = history.filter(function (m) {
-        const from = String(m.senderId || "").toLowerCase();
-        const to = String(m.toUser || "").toLowerCase();
-        return keys.indexOf(from) !== -1 || keys.indexOf(to) !== -1;
-      });
-    } else if (!user) {
-      history = [];
+    applyDmHeading(swap, currentDmAddressId, opts.peerName);
+
+    els.chatBody.innerHTML = '<div class="chat-empty">Loading conversation…</div>';
+    if (els.dmInput) els.dmInput.value = "";
+    clearDmError();
+    openModal(els.modalDm);
+    syncChatModalHeight();
+    startMessagePoll();
+
+    try {
+      let history = await loadThreadHistory(swap, currentDmAddressId, currentDmThreadKey);
+      let mixed = false;
+      if (!currentDmAddressId && history.length) {
+        const parties = [];
+        history.forEach(function (m) {
+          const info = threadInfoFor(m, swap);
+          if (!info || !info.addressId || isSelfAddress(info.addressId)) return;
+          if (!parties.some(function (p) { return p.key === info.key; })) parties.push(info);
+        });
+        if (parties.length === 1) {
+          currentDmAddressId = parties[0].addressId;
+          currentDmThreadKey = parties[0].key;
+          history = filterHistory(history, swap, currentDmAddressId, currentDmThreadKey);
+          applyDmHeading(swap, currentDmAddressId, partyName(parties[0].otherRaw || parties[0].addressId, swap));
+        } else if (parties.length > 1) {
+          mixed = true;
+        }
+      }
+      if (mixed) {
+        currentDmSig = "";
+        els.chatBody.innerHTML = '<div class="chat-empty">Each carrier has their own conversation. Open My Messages and choose one to reply.</div>';
+      } else {
+        currentDmSig = history.map(function (m) { return String(m.id); }).join(",");
+        renderDmHistory(history, true);
+      }
+    } catch (err) {
+      console.warn("Could not load messages:", err);
+      currentDmSig = "";
+      els.chatBody.innerHTML = '<div class="chat-empty">Couldn’t load this conversation.</div>';
     }
 
-    if (history.length) {
-      const myId = user ? user.id : "guest";
-      els.chatBody.innerHTML = history
-        .map((m) => {
-          const who = idEq(m.senderId, myId) ? "me" : "them";
-          return `<div class="chat-msg ${who}">${escapeHtml(m.body)}<span class="msg-time">${formatMsgTime(m.createdAt)}</span></div>`;
-        })
-        .join("");
-    } else {
-      const starters = [
-        `Hi! Thanks for reaching out about the ${swap.current} → ${swap.desired} swap. Happy to share more details.`,
-        `I'm a ${swap.craft} with ${formatSeniority(swap.seniority)} seniority. Looking for ${String(swap.swapType || "permanent").toLowerCase()} mutual if the fit is right.`,
-      ];
-      els.chatBody.innerHTML = starters
-        .map(
-          (text) =>
-            `<div class="chat-msg them">${escapeHtml(text)}<span class="msg-time">${timeNow()}</span></div>`
-        )
-        .join("");
-    }
-
-    setTimeout(() => {
-      els.chatBody.scrollTop = els.chatBody.scrollHeight;
-      els.dmInput.focus();
-      els.dmInput.select();
+    setTimeout(function () {
+      if (els.chatBody) els.chatBody.scrollTop = els.chatBody.scrollHeight;
+      if (els.dmInput) els.dmInput.focus();
     }, 80);
   }
 
   async function sendDm(e) {
     e.preventDefault();
-    if (
-      !requireAuth("Sign up free to send DMs to other carriers.")
-    ) {
+    if (!requireAuth("Sign up free to send DMs to other carriers.")) return;
+    const text = els.dmInput.value.trim();
+    if (!currentDmSwap) return;
+    if (!text) {
+      showDmError("Type a message, then send or retry.");
       return;
     }
-    const text = els.dmInput.value.trim();
-    if (!text || !currentDmSwap) return;
+    clearDmError();
+    if (!currentDmAddressId) {
+      showDmError("Open the carrier’s conversation in My Messages before replying.");
+      return;
+    }
 
     const sendBtn = els.formDm && els.formDm.querySelector('button[type="submit"]');
     setButtonLoading(sendBtn, true);
-
-    appendChatMessage("me", text);
-    els.dmInput.value = "";
-
-    const canSaveRemote =
-      useSupabase &&
-      db() &&
-      currentDmSwap.id != null &&
-      !String(currentDmSwap.id).startsWith("local-");
-
-    if (canSaveRemote) {
-      try {
-        console.log("[PostSwap] sendDm: saving to Supabase…", {
-          swapId: currentDmSwap.id,
-          senderId: user ? user.id : "guest",
-        });
-        // Always stamp from_user with stable user id; to_user = listing owner id/username
-        const savedMsg = await db().sendMessage({
-          swapId: currentDmSwap.id,
-          senderId: user ? user.id : "guest",
-          toUser:
-            currentDmSwap.ownerId ||
-            currentDmSwap.username ||
-            null,
-          body: text,
-        });
-        console.log("[PostSwap] sendDm: saved", savedMsg);
-
-        // Email notification → swap owner (profiles + email_queue)
-        if (typeof db().notifyNewDm === "function") {
-          try {
-            const notify = await db().notifyNewDm({
-              swap: currentDmSwap,
-              messageBody: text,
-              fromUser: user || { id: "guest", name: "A verified carrier" },
-            });
-            console.log("[PostSwap] sendDm: email notify", notify);
-            if (notify && notify.queued > 0) {
-              showToast(
-                "Email notification queued",
-                notify.to
-                  ? `DM alert queued for ${notify.to}`
-                  : "Owner will be emailed if notifications are on."
-              );
-              // Refresh mailbox for recipient sessions later; sender stays clean
-            }
-            // Sender's own mailbox: refresh so "You messaged…" can appear if desired
-            refreshMailboxFromDb();
-          } catch (notifyErr) {
-            console.warn("[PostSwap] sendDm: email notify failed", notifyErr);
-          }
-        }
-      } catch (err) {
-        console.error("[PostSwap] sendDm: Supabase INSERT failed", {
-          message: err && err.message,
-          status: err && err.status,
-          data: err && err.data,
-          error: err,
-        });
-        showToast(
-          "Message sent locally",
-          (err && err.message) || "Couldn’t sync to Supabase — check RLS on messages table."
-        );
+    try {
+      const saved = await deliverMessage(currentDmSwap, currentDmAddressId, text);
+      els.dmInput.value = "";
+      appendChatMessage("me", (saved && saved.body) || text, formatMsgTime(saved && saved.createdAt));
+      if (saved && saved.id != null) {
+        currentDmSig = currentDmSig
+          ? currentDmSig + "," + String(saved.id)
+          : String(saved.id);
       }
-    } else {
-      console.log("[PostSwap] sendDm: local-only (no remote swap id)", {
-        swapId: currentDmSwap && currentDmSwap.id,
-      });
-    }
-
-    setButtonLoading(sendBtn, false);
-
-    // Light auto-reply for demo feel when no remote thread yet
-    if (!canSaveRemote) {
-      setTimeout(() => {
-        if (els.modalDm.hidden) return;
-        const replies = [
-          "Sounds good — I'm free after my route most weekdays. What's your craft and seniority?",
-          "Great! Mutual swaps are the way to keep benefits. Want to compare notes on stations next?",
-          "Appreciate the message. Happy to walk through details when you're ready.",
-        ];
-        appendChatMessage("them", replies[Math.floor(Math.random() * replies.length)]);
-      }, 900 + Math.random() * 600);
+      try {
+        await refreshOpenDm();
+      } catch (refreshErr) {
+        console.warn("[PostSwap] refresh after send failed", refreshErr);
+      }
+    } catch (err) {
+      console.error("[PostSwap] sendDm failed", err);
+      showDmError(friendlySendError(err));
+    } finally {
+      setButtonLoading(sendBtn, false);
     }
   }
+
 
   // ---------- Post swap ----------
   async function handlePost(e) {
@@ -2544,38 +3105,64 @@
       });
     }
     if (els.inboxRefresh) {
-      els.inboxRefresh.addEventListener("click", () => loadInboxThreads());
+      els.inboxRefresh.addEventListener("click", function () {
+        loadInboxThreads({ reveal: false });
+      });
+    }
+    if (els.inboxBack) {
+      els.inboxBack.addEventListener("click", function () {
+        inboxBackToList();
+      });
     }
     if (els.inboxThreads) {
-      els.inboxThreads.addEventListener("click", (e) => {
-        const item = e.target.closest("[data-inbox-swap]");
+      els.inboxThreads.addEventListener("click", function (e) {
+        const item = e.target.closest("[data-inbox-thread]");
         if (!item) return;
-        selectInboxThread(item.getAttribute("data-inbox-swap"));
+        selectInboxThread(item.getAttribute("data-inbox-thread"), { reveal: true });
+      });
+    }
+    if (els.formInboxReply) {
+      els.formInboxReply.addEventListener("submit", sendInboxReply);
+    }
+    if (els.inboxReplyInput) {
+      els.inboxReplyInput.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          sendInboxReply(e);
+        }
+      });
+    }
+    if (els.inboxSendRetry) {
+      els.inboxSendRetry.addEventListener("click", function () {
+        sendInboxReply();
+      });
+    }
+    if (els.dmSendRetry) {
+      els.dmSendRetry.addEventListener("click", function () {
+        if (els.formDm) els.formDm.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
       });
     }
     if (els.inboxOpenDm) {
-      els.inboxOpenDm.addEventListener("click", () => {
-        if (!activeInboxSwapId) return;
-        const thread = inboxThreads.find((t) => idEq(t.swapId, activeInboxSwapId));
-        const swap =
-          (thread && thread.swap) ||
-          findSwapById(activeInboxSwapId) || {
-            id: activeInboxSwapId,
-            current: "Unknown",
-            desired: "Unknown",
-            craft: "Letter Carrier",
-            seniority: 0,
-            swapType: "Permanent",
-            privacyLabel: "Verified Carrier",
-            region: "United States",
-            notes: "",
-          };
-        // If user owns the swap, still allow viewing via DM modal blocked — open read-only via inbox already
-        if (user && idEq(swap.ownerId, user.id)) {
-          showToast("Your listing", "This is your swap’s thread — reply when carriers message you here.");
-          return;
-        }
-        openDm(swap);
+      els.inboxOpenDm.addEventListener("click", function () {
+        if (!activeInboxThreadKey) return;
+        const thread = inboxThreads.find(function (t) { return t.key === activeInboxThreadKey; });
+        if (!thread) return;
+        const swap = thread.swap || findSwapById(thread.swapId) || {
+          id: thread.swapId,
+          current: "",
+          desired: "",
+          craft: "Letter Carrier",
+          seniority: 0,
+          swapType: "Permanent",
+          privacyLabel: "",
+          region: "United States",
+          notes: "",
+        };
+        openDm(swap, {
+          addressId: thread.addressId,
+          threadKey: thread.key,
+          peerName: thread.peerName,
+        });
       });
     }
     if (els.mailboxList) {
@@ -2601,6 +3188,14 @@
       const actionEl = e.target.closest("[data-action]");
       if (actionEl) {
         onAction(actionEl.getAttribute("data-action"), e);
+        return;
+      }
+
+      const viewBtn = e.target.closest("[data-view-listing]");
+      if (viewBtn && !viewBtn.closest(".leaflet-popup-content")) {
+        e.preventDefault();
+        e.stopPropagation();
+        openMySwaps(viewBtn.getAttribute("data-view-listing"));
         return;
       }
 
@@ -2734,6 +3329,15 @@
     // Forms
     els.formPost.addEventListener("submit", handlePost);
     els.formDm.addEventListener("submit", sendDm);
+    window.addEventListener("resize", function () {
+      syncInboxMode();
+      if (messagingModalOpen()) syncChatModalHeight();
+    });
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", function () {
+        if (messagingModalOpen()) syncChatModalHeight();
+      });
+    }
     if (els.formProfile) {
       els.formProfile.addEventListener("submit", saveProfile);
     }

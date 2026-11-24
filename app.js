@@ -43,6 +43,9 @@
   let user = null; // full profile + notification prefs
   let useSupabase = typeof window.PostSwapDB !== "undefined";
   let swapsLoaded = false;
+  let editingSwapId = null;
+  let allowDuplicatePost = false;
+  let duplicateSwapId = null;
 
   function db() {
     return window.PostSwapDB;
@@ -1094,6 +1097,7 @@
     const craft = els.filterCraft.value;
 
     const filtered = swaps.filter((s) => {
+      if (!swapIsPublic(s)) return false;
       // Exact craft match only. Blank means "all crafts" (no extra craft invented).
       if (craft && s.craft !== craft) return false;
       if (nearMeCenter) {
@@ -1336,6 +1340,7 @@
             }
           </button>
           ${shareButtonHtml(s)}
+          ${userOwnsSwap(s) ? `<button type="button" class="link-btn swap-manage" data-view-listing="${s.id}">Manage</button>` : ""}
         </div>
         <p class="share-nudge">${
           user
@@ -1394,14 +1399,13 @@
             openDm(s);
           });
         }
-        const viewBtn = root.querySelector(`[data-view-listing="${s.id}"]`);
-        if (viewBtn) {
+        root.querySelectorAll("[data-view-listing]").forEach(function (viewBtn) {
           viewBtn.addEventListener("click", (ev) => {
             ev.preventDefault();
             ev.stopPropagation();
             openMySwaps(s.id);
           });
-        }
+        });
         const shareBtn = root.querySelector(`[data-share-id="${s.id}"]`);
         if (shareBtn) {
           shareBtn.addEventListener("click", (ev) => {
@@ -1493,6 +1497,7 @@
           </div>
           <div class="swap-privacy">${isMine ? "Your listing • visible to carriers" : escapeHtml(s.privacyLabel)}</div>
           <div class="swap-card-actions">
+            ${isMine ? `<button type="button" class="link-btn swap-manage" data-view-listing="${s.id}">Manage</button>` : ""}
             <button type="button" class="btn btn-primary" ${
               isMine ? `data-view-listing="${s.id}"` : `data-dm-id="${s.id}"`
             }>
@@ -2597,6 +2602,15 @@
     ) {
       return;
     }
+    if (editingSwapId && els.formPost) {
+      els.formPost.reset();
+      const permanent = els.formPost.querySelector('input[name="swapType"][value="Permanent"]');
+      if (permanent) permanent.checked = true;
+    }
+    editingSwapId = null;
+    allowDuplicatePost = false;
+    hideDuplicateWarning();
+    setPostMode("new");
     openModal(els.modalPost);
   }
 
@@ -2629,12 +2643,20 @@
       els.mySwapsBody.innerHTML = mine
         .map(function (s) {
           const current = focusId != null && idEq(s.id, focusId);
+          const open = swapIsPublic(s);
+          const status = swapStatusLabel(s);
           return `
-        <div class="my-swap-item${current ? " is-current" : ""}" data-my-swap="${escapeHtml(String(s.id))}">
+        <div class="my-swap-item${current ? " is-current" : ""}${open ? "" : " is-closed"}" data-my-swap="${escapeHtml(String(s.id))}">
+          <p class="my-swap-status">${escapeHtml(status)}</p>
           <h4>${escapeHtml(s.current)} → ${escapeHtml(s.desired)}</h4>
           <p>${escapeHtml(s.craft)} · ${formatSeniority(s.seniority)} · ${escapeHtml(s.swapType)}</p>
           ${s.notes ? `<p style="margin-top:0.4rem;font-style:italic">“${escapeHtml(s.notes)}”</p>` : ""}
-          <p style="margin-top:0.45rem">Your listing. Replies from carriers are in My Messages.</p>
+          <p style="margin-top:0.45rem">${open ? "On the public map. Replies are in My Messages." : "Hidden from the public map. Still saved here."}</p>
+          <div class="my-swap-actions">
+            <button type="button" class="btn btn-primary btn-sm" data-swap-edit="${escapeHtml(String(s.id))}">Edit</button>
+            ${open ? `<button type="button" class="btn btn-outline btn-sm" data-swap-close="${escapeHtml(String(s.id))}">Close / Mark as swapped</button>` : ""}
+            <button type="button" class="btn btn-ghost btn-sm" data-swap-delete="${escapeHtml(String(s.id))}">Delete</button>
+          </div>
         </div>
       `;
         })
@@ -2880,6 +2902,199 @@
   }
 
 
+  function swapIsPublic(swap) {
+    const status = swap && swap.status ? String(swap.status).toLowerCase() : "open";
+    return status === "open";
+  }
+
+  function swapStatusLabel(swap) {
+    const status = swap && swap.status ? String(swap.status).toLowerCase() : "open";
+    if (status === "closed") return "Closed";
+    if (status === "archived") return "Archived";
+    return "Open";
+  }
+
+  function normPlace(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/[.#]/g, "")
+      .replace(/,/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function placeParts(value) {
+    const bits = String(value || "")
+      .split(",")
+      .map(function (part) { return part.trim(); })
+      .filter(Boolean);
+    return {
+      full: normPlace(value),
+      city: normPlace(bits[0] || value),
+      state: bits[1] ? normPlace(bits[1]) : "",
+    };
+  }
+
+  function sameCurrentPlace(a, b) {
+    const left = normPlace(a);
+    return !!left && left === normPlace(b);
+  }
+
+  function similarDesiredPlace(a, b) {
+    const left = placeParts(a);
+    const right = placeParts(b);
+    if (!left.full || !right.full) return false;
+    if (left.full === right.full) return true;
+    if (left.city && left.city === right.city && left.city.length >= 3) {
+      if (!left.state || !right.state || left.state === right.state) return true;
+    }
+    const shorter = left.full.length <= right.full.length ? left.full : right.full;
+    const longer = left.full.length > right.full.length ? left.full : right.full;
+    return shorter.length >= 4 && longer.indexOf(shorter) !== -1;
+  }
+
+  function findOpenDuplicate(current, desired, ignoreId) {
+    return swaps.find(function (swap) {
+      if (!userOwnsSwap(swap) || !swapIsPublic(swap)) return false;
+      if (ignoreId != null && idEq(swap.id, ignoreId)) return false;
+      return sameCurrentPlace(swap.current, current) && similarDesiredPlace(swap.desired, desired);
+    }) || null;
+  }
+
+  function ownerCanWrite(swap) {
+    return !!(user && user.id && swap && idEq(swap.ownerId, user.id));
+  }
+
+  function swapWriteError(err) {
+    const msg = (err && err.message) || "Couldn’t update that swap.";
+    if (/status/i.test(msg) && /column|schema|PGRST/i.test(msg)) {
+      return "Add a status column on public.swaps (open, closed, or archived), then try again.";
+    }
+    return String(msg).slice(0, 160);
+  }
+
+  function hideDuplicateWarning() {
+    duplicateSwapId = null;
+    const box = $("#swap-duplicate");
+    if (box) box.hidden = true;
+  }
+
+  function showDuplicateWarning(swap) {
+    duplicateSwapId = swap.id;
+    const box = $("#swap-duplicate");
+    const text = $("#swap-duplicate-text");
+    if (text) {
+      text.textContent = "You already have an open swap from " + swap.current + " to " + swap.desired + ".";
+    }
+    if (box) box.hidden = false;
+  }
+
+  function setPostMode(mode) {
+    const title = $("#post-title");
+    const sub = $("#post-sub");
+    const label = document.querySelector("#post-submit-btn .btn-label");
+    if (mode === "edit") {
+      if (title) title.textContent = "Edit your swap";
+      if (sub) sub.textContent = "Save to update this listing. Closing it hides it from the public map.";
+      if (label) label.textContent = "Save changes";
+    } else {
+      if (title) title.textContent = "Post Your Swap";
+      if (sub) sub.textContent = "Mutual swaps let everyone keep seniority and benefits!";
+      if (label) label.textContent = "Post My Swap";
+    }
+  }
+
+  function refreshPublicSwaps() {
+    refreshViews();
+    forceMapRefresh(getFilteredSwaps());
+  }
+
+  function replaceSwap(next) {
+    const merged = withPinCoords(next);
+    const idx = swaps.findIndex(function (s) { return idEq(s.id, merged.id); });
+    if (idx >= 0) swaps[idx] = merged;
+    else swaps.unshift(merged);
+    refreshPublicSwaps();
+    return merged;
+  }
+
+  function startEditSwap(id) {
+    const swap = findSwapById(id);
+    if (!swap || !userOwnsSwap(swap)) return;
+    if (!ownerCanWrite(swap)) {
+      showToast("Can’t edit this listing", "It isn’t tied to your account id.");
+      return;
+    }
+    editingSwapId = swap.id;
+    allowDuplicatePost = false;
+    hideDuplicateWarning();
+    $("#post-current").value = swap.current || "";
+    $("#post-desired").value = swap.desired || "";
+    $("#post-craft").value = swap.craft || "";
+    $("#post-seniority").value = swap.seniority != null ? String(swap.seniority) : "";
+    $("#post-notes").value = swap.notes || "";
+    const radio = els.formPost.querySelector(
+      'input[name="swapType"][value="' + (swap.swapType || "Permanent") + '"]'
+    );
+    if (radio) radio.checked = true;
+    setPostMode("edit");
+    openModal(els.modalPost);
+  }
+
+  async function closeOwnSwap(id, opts) {
+    opts = opts || {};
+    const swap = findSwapById(id);
+    if (!swap || !userOwnsSwap(swap)) return;
+    if (!ownerCanWrite(swap)) {
+      showToast("Can’t close this listing", "It isn’t tied to your account id.");
+      return;
+    }
+    try {
+      let next = Object.assign({}, swap, { status: "closed" });
+      if (useSupabase && db() && typeof db().updateSwap === "function" && !String(swap.id).startsWith("local-")) {
+        next = await db().updateSwap(swap.id, { status: "closed" }, user.id);
+        next = Object.assign({}, swap, next, { status: "closed" });
+      }
+      replaceSwap(next);
+      if (opts.keepComposer) {
+        hideDuplicateWarning();
+        showToast("Existing listing closed", "It’s off the public map. You can post this one if you still want it.");
+        return;
+      }
+      openMySwaps(next.id);
+      showToast("Listing closed", "It’s hidden from the public map and still in My Swaps.");
+    } catch (err) {
+      console.error("[PostSwap] close swap failed", err);
+      showToast("Couldn’t close listing", swapWriteError(err));
+    }
+  }
+
+  async function deleteOwnSwap(id) {
+    const swap = findSwapById(id);
+    if (!swap || !userOwnsSwap(swap)) return;
+    if (!ownerCanWrite(swap)) {
+      showToast("Can’t delete this listing", "It isn’t tied to your account id.");
+      return;
+    }
+    const ok = window.confirm(
+      "Delete this swap permanently? Closing it keeps the listing in My Swaps and only removes it from the public map."
+    );
+    if (!ok) return;
+    try {
+      if (useSupabase && db() && typeof db().deleteSwap === "function" && !String(swap.id).startsWith("local-")) {
+        await db().deleteSwap(swap.id, user.id);
+      }
+      swaps = swaps.filter(function (s) { return !idEq(s.id, swap.id); });
+      if (idEq(activeSwapId, swap.id)) activeSwapId = null;
+      refreshPublicSwaps();
+      openMySwaps();
+      showToast("Swap deleted", "That listing is gone.");
+    } catch (err) {
+      console.error("[PostSwap] delete swap failed", err);
+      showToast("Couldn’t delete listing", swapWriteError(err));
+    }
+  }
+
   // ---------- Post swap ----------
   async function handlePost(e) {
     e.preventDefault();
@@ -2909,6 +3124,21 @@
       return;
     }
 
+    if (editingSwapId) {
+      await saveEditedSwap({ current: current, desired: desired, craft: craft, seniority: seniority, swapType: swapType, notes: notes });
+      return;
+    }
+
+    if (!allowDuplicatePost) {
+      const duplicate = findOpenDuplicate(current, desired, null);
+      if (duplicate) {
+        showDuplicateWarning(duplicate);
+        return;
+      }
+    }
+    allowDuplicatePost = false;
+    hideDuplicateWarning();
+
     const submitBtn = $("#post-submit-btn");
     setButtonLoading(submitBtn, true);
 
@@ -2926,6 +3156,7 @@
       region,
       privacyLabel: `Verified Carrier • ${region}`,
       ownerId: user ? user.id : "guest",
+      status: "open",
       justAdded: true,
     };
 
@@ -3041,6 +3272,47 @@
     }
 
     $("#explore").scrollIntoView({ behavior: "smooth" });
+  }
+
+  async function saveEditedSwap(fields) {
+    const existing = findSwapById(editingSwapId);
+    const submitBtn = $("#post-submit-btn");
+    if (!existing || !ownerCanWrite(existing)) {
+      showToast("Can’t edit this listing", "It isn’t tied to your account id.");
+      return;
+    }
+    setButtonLoading(submitBtn, true);
+    const notes = fields.notes || "";
+    try {
+      let next = Object.assign({}, existing, fields, { notes: notes, justAdded: false });
+      if (useSupabase && db() && typeof db().updateSwap === "function" && !String(existing.id).startsWith("local-")) {
+        const saved = await db().updateSwap(existing.id, {
+          current: fields.current,
+          desired: fields.desired,
+          craft: fields.craft,
+          seniority: fields.seniority,
+          notes: notes,
+          swapType: fields.swapType,
+        }, user.id);
+        next = Object.assign({}, existing, saved, {
+          swapType: fields.swapType,
+          status: (saved && saved.status) || existing.status || "open",
+          notes: notes,
+        });
+      }
+      const savedId = next.id;
+      editingSwapId = null;
+      allowDuplicatePost = false;
+      replaceSwap(next);
+      setButtonLoading(submitBtn, false);
+      if (els.formPost) els.formPost.reset();
+      openMySwaps(savedId);
+      showToast("Swap updated", "The public map shows the new details if this listing is still open.");
+    } catch (err) {
+      console.error("[PostSwap] edit swap failed", err);
+      setButtonLoading(submitBtn, false);
+      showToast("Couldn’t save changes", swapWriteError(err));
+    }
   }
 
   // ---------- Event wiring ----------
@@ -3340,6 +3612,46 @@
 
     // Forms
     els.formPost.addEventListener("submit", handlePost);
+    ["post-current", "post-desired"].forEach(function (id) {
+      const input = document.getElementById(id);
+      if (!input) return;
+      input.addEventListener("input", function () {
+        allowDuplicatePost = false;
+        hideDuplicateWarning();
+      });
+    });
+    const dupEdit = $("#swap-duplicate-edit");
+    const dupClose = $("#swap-duplicate-close");
+    const dupAnyway = $("#swap-duplicate-anyway");
+    if (dupEdit) {
+      dupEdit.addEventListener("click", function () {
+        if (duplicateSwapId != null) startEditSwap(duplicateSwapId);
+      });
+    }
+    if (dupClose) {
+      dupClose.addEventListener("click", function () {
+        if (duplicateSwapId != null) closeOwnSwap(duplicateSwapId, { keepComposer: true });
+      });
+    }
+    if (dupAnyway) {
+      dupAnyway.addEventListener("click", function () {
+        allowDuplicatePost = true;
+        if (els.formPost) els.formPost.requestSubmit();
+      });
+    }
+    if (els.mySwapsBody) {
+      els.mySwapsBody.addEventListener("click", function (e) {
+        const editBtn = e.target.closest("[data-swap-edit]");
+        const closeBtn = e.target.closest("[data-swap-close]");
+        const deleteBtn = e.target.closest("[data-swap-delete]");
+        if (!editBtn && !closeBtn && !deleteBtn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (editBtn) startEditSwap(editBtn.getAttribute("data-swap-edit"));
+        else if (closeBtn) closeOwnSwap(closeBtn.getAttribute("data-swap-close"));
+        else deleteOwnSwap(deleteBtn.getAttribute("data-swap-delete"));
+      });
+    }
     els.formDm.addEventListener("submit", sendDm);
     window.addEventListener("resize", function () {
       syncInboxMode();

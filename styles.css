@@ -2246,6 +2246,13 @@ textarea { resize: vertical; min-height: 90px; }
   flex-direction: column;
   gap: 0.5rem;
 }
+.swap-manage {
+  width: auto;
+  align-self: flex-start;
+  padding: 0;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
 
 /* Share button — friendly, truck + label */
 .btn-share {
@@ -2974,6 +2981,37 @@ body.modal-open .bmc-float {
 }
 .my-swap-item h4 { font-size: 0.95rem; font-weight: 700; margin-bottom: 0.35rem; }
 .my-swap-item p { font-size: 0.85rem; color: var(--text-muted); }
+.my-swap-item .my-swap-status {
+  display: inline-block;
+  margin-bottom: 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--usps-blue);
+}
+.my-swap-item.is-closed .my-swap-status { color: var(--text-muted); }
+.my-swap-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.75rem;
+}
+.swap-duplicate {
+  border: 1px solid var(--usps-blue);
+  background: var(--usps-blue-soft);
+  border-radius: var(--radius);
+  padding: 0.85rem 0.9rem;
+  margin-bottom: 0.85rem;
+}
+.swap-duplicate[hidden] { display: none !important; }
+.swap-duplicate p { margin: 0; font-size: 0.875rem; color: var(--text); }
+.swap-duplicate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.65rem;
+}
 .my-swaps-empty {
   text-align: center;
   padding: 2rem 1rem;

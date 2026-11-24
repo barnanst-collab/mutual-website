@@ -4,6 +4,16 @@
 
 -- Existing: public.swaps, public."messages (for DMs)"
 alter table if exists public.swaps disable row level security;
+
+-- Listing status for owner controls. Does not enable row level security.
+-- open = on the public map and list. closed / archived = hidden from the public, kept for the owner.
+alter table public.swaps
+  add column if not exists status text not null default 'open';
+
+alter table public.swaps drop constraint if exists swaps_status_check;
+alter table public.swaps
+  add constraint swaps_status_check
+  check (status in ('open', 'closed', 'archived'));
 -- Messages RLS is enabled at the bottom of this file.
 -- A user may read a row only when from_user or to_user is one of their identity keys.
 

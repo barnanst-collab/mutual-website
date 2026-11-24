@@ -200,6 +200,7 @@
       ownerId: row.user_id || null,
       username: username,
       createdAt: row.created_at || null,
+      status: row.status ? String(row.status).toLowerCase() : "open",
     };
   }
 
@@ -311,6 +312,83 @@
       });
       throw err;
     }
+  }
+
+  function requireSwapOwner(ownerId) {
+    if (ownerId == null || String(ownerId).trim() === "" || String(ownerId) === "guest") {
+      const err = new Error("Sign in to change your own swap.");
+      err.status = 401;
+      throw err;
+    }
+  }
+
+  function pgTopEq(col, val) {
+    const v = String(val);
+    if (/[\s,():."']/.test(v) || v.indexOf("•") !== -1) {
+      return col + '=eq."' + v.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+    }
+    return col + "=eq." + encodeURIComponent(v);
+  }
+
+  function swapOwnedPath(swapId, ownerId) {
+    return "/swaps?" + pgTopEq("id", swapId) + "&" + pgTopEq("user_id", ownerId);
+  }
+
+  /**
+   * Update one swap. The request is limited to user_id = ownerId, and ownerId is required.
+   * Does not change who owns the row.
+   */
+  async function updateSwap(swapId, patch, ownerId) {
+    requireSwapOwner(ownerId);
+    if (swapId == null || String(swapId).startsWith("local-")) {
+      throw new Error("This swap isn’t saved on the server yet.");
+    }
+    const body = {};
+    const src = patch || {};
+    if (src.current != null) body.current_location = src.current;
+    if (src.desired != null) body.desired_location = src.desired;
+    if (src.craft != null) body.craft = src.craft;
+    if (src.seniority != null) body.seniority = src.seniority;
+    if (src.notes != null) body.notes = src.notes;
+    if (src.username != null) body.username = src.username;
+    if (src.status != null) {
+      const status = String(src.status).toLowerCase();
+      if (status !== "open" && status !== "closed" && status !== "archived") {
+        throw new Error("Status must be open, closed, or archived.");
+      }
+      body.status = status;
+    }
+    if (!Object.keys(body).length) throw new Error("Nothing to update.");
+    console.log("[PostSwapDB] updateSwap", swapId, body);
+    const rows = await request(swapOwnedPath(swapId, ownerId), {
+      method: "PATCH",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify(body),
+    });
+    const row = Array.isArray(rows) ? rows[0] : rows;
+    if (!row) throw new Error("That swap wasn’t updated. Only the owner can change it.");
+    const mapped = mapSwapFromDb(row);
+    if (src.swapType) mapped.swapType = src.swapType;
+    return mapped;
+  }
+
+  /**
+   * Delete one swap. Refuses a call with no owner id, and the DELETE
+   * only matches a row whose user_id is that owner.
+   */
+  async function deleteSwap(swapId, ownerId) {
+    requireSwapOwner(ownerId);
+    if (swapId == null || String(swapId).startsWith("local-")) {
+      throw new Error("This swap isn’t saved on the server yet.");
+    }
+    console.log("[PostSwapDB] deleteSwap", swapId);
+    const rows = await request(swapOwnedPath(swapId, ownerId), {
+      method: "DELETE",
+      headers: { Prefer: "return=representation" },
+    });
+    const row = Array.isArray(rows) ? rows[0] : rows;
+    if (!row) throw new Error("That swap wasn’t deleted. Only the owner can remove it.");
+    return mapSwapFromDb(row);
   }
 
   // ---------- Messages (DMs) — table name includes spaces ----------
@@ -1357,6 +1435,8 @@
     SUPABASE_URL: SUPABASE_URL,
     fetchSwaps: fetchSwaps,
     createSwap: createSwap,
+    updateSwap: updateSwap,
+    deleteSwap: deleteSwap,
     messagesTable: MESSAGES_TABLE,
     fetchMessages: fetchMessages,
     fetchMessagesForUser: fetchMessagesForUser,

@@ -3457,12 +3457,14 @@ body.modal-open .fab-quick-post {
   transform: scale(0.9) translateY(8px);
 }
 
-/* Step aside when Quick Post covers Load more. */
-@media (max-width: 700px) {
-  .fab-quick-post.fab-yield {
-    opacity: 0;
-    pointer-events: none;
-  }
+/* Step aside when Quick Post covers Load more.
+   fabIn uses animation-fill forwards, so opacity must beat that animation. */
+.fab-quick-post.fab-yield {
+  animation: none !important;
+  opacity: 0 !important;
+  transform: translateY(12px) scale(.9);
+  pointer-events: none;
+  transition: opacity .2s ease, transform .2s ease;
 }
 
 @keyframes fabIn {

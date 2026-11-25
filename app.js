@@ -208,7 +208,6 @@
     dmTitle: $("#dm-title"),
     dmSubtitle: $("#dm-subtitle"),
     useLocationBtn: $("#use-location-btn"),
-    demoLoginBtn: $("#demo-login-btn"),
     mySwapsBody: $("#my-swaps-body"),
     toastContainer: $("#toast-container"),
     mailbox: $("#mailbox"),
@@ -949,20 +948,6 @@
         <button type="button" class="btn btn-primary btn-block" data-action="open-register">Register</button>
       `;
     }
-  }
-
-  function demoLogin() {
-    setLoggedIn({
-      id: "demo-1",
-      name: "Maria Chen",
-      email: "maria.demo@postswap.app",
-      craft: "Letter Carrier",
-      station: "North Las Vegas Main",
-      state: "NV",
-      initials: "MC",
-      notifications: { ...DEFAULT_NOTIFICATIONS },
-    });
-    closeAllModals();
   }
 
   function restoreSession() {
@@ -4319,8 +4304,6 @@
         { enableHighAccuracy: false, timeout: 8000, maximumAge: 300000 }
       );
     });
-
-    els.demoLoginBtn.addEventListener("click", demoLogin);
 
     els.formLogin.addEventListener("submit", async (e) => {
       e.preventDefault();

@@ -9,8 +9,8 @@
   --usps-red: #B22234;
   --usps-red-hover: #961c2b;
   --text: #1F2937;
-  --text-muted: #6B7280;
-  --text-light: #9CA3AF;
+  --text-muted: #374151;
+  --text-light: #4B5563;
   --bg: #FFFFFF;
   --card: #F8FAFC;
   --border: #E5E7EB;
@@ -1096,10 +1096,10 @@ ul { list-style: none; }
   }
 }
 
-/* Truck visual — large, eye-catching */
+/* Truck visual — large, eye-catching. Copy comes first on small screens. */
 .hero-visual {
   position: relative;
-  order: -1;
+  order: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1153,14 +1153,16 @@ ul { list-style: none; }
   animation: truckFloat 3.2s ease-in-out infinite;
 }
 
-/* Copy column */
+/* Copy column — above the truck until the two-column hero */
 .hero-copy {
+  order: -1;
   text-align: center;
   animation: heroCopyIn 0.85s var(--ease) 0.1s both;
 }
 
 @media (min-width: 900px) {
   .hero-copy {
+    order: 0;
     text-align: left;
     padding-block: 1rem;
   }
@@ -1563,11 +1565,64 @@ ul { list-style: none; }
 }
 .safety-note strong { color: var(--text); }
 
-/* ---------- Official Regulations ---------- */
+/* ---------- Official Regulations (collapsed until opened) ---------- */
 .regulations {
   background: linear-gradient(180deg, #FFFFFF 0%, #F8FAFC 100%);
   border-top: 1px solid var(--border-soft);
 }
+.regs-details {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2xl);
+  box-shadow: var(--shadow-sm);
+}
+.regs-summary {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  position: relative;
+  padding: 1.15rem 3rem 1.15rem 1.35rem;
+  min-height: 64px;
+  cursor: pointer;
+  list-style: none;
+}
+.regs-summary::-webkit-details-marker { display: none; }
+.regs-summary::marker { content: ""; }
+.regs-summary::after {
+  content: "";
+  position: absolute;
+  right: 1.3rem;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  border-right: 2.5px solid var(--usps-blue);
+  border-bottom: 2.5px solid var(--usps-blue);
+  transform: translateY(-70%) rotate(45deg);
+}
+.regs-details[open] .regs-summary::after {
+  transform: translateY(-20%) rotate(225deg);
+}
+.regs-summary-kicker {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--usps-red);
+}
+.regs-summary-title {
+  font-size: 1.35rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  line-height: 1.2;
+}
+.regs-summary-hint {
+  font-size: 0.92rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+.regs-body { padding: 0.25rem 1.25rem 1.5rem; }
 
 .card-panel {
   background: #fff;
@@ -1828,6 +1883,12 @@ textarea:focus {
   outline: none;
   border-color: var(--usps-blue);
   box-shadow: 0 0 0 3px rgba(0, 48, 135, 0.12);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #4B5563;
+  opacity: 1;
 }
 
 select, input[type="text"], input[type="email"], input[type="password"],
@@ -2136,6 +2197,40 @@ textarea { resize: vertical; min-height: 90px; }
   border-radius: 999px;
 }
 
+.list-sort {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  background: #fff;
+  flex-shrink: 0;
+}
+.list-sort label {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+}
+.list-sort select {
+  flex: 1;
+  min-height: 48px;
+  font-size: 1rem;
+  font-weight: 650;
+  color: var(--text);
+}
+@media (max-width: 640px) {
+  .list-sort {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.35rem;
+  }
+  .list-sort select {
+    width: 100%;
+    min-height: 48px;
+  }
+}
+
 .swap-list {
   flex: 1;
   overflow-y: auto;
@@ -2146,6 +2241,24 @@ textarea { resize: vertical; min-height: 90px; }
   scroll-behavior: smooth;
 }
 .swap-list:focus { outline: none; }
+
+/* Phone: the list scrolls inside itself so the page stays short. */
+@media (max-width: 959px) {
+  .swap-list {
+    max-height: 70vh;
+    overflow-y: auto;
+    /* Clear the fixed Quick Post button when the list reaches the bottom. */
+    padding-bottom: 5.25rem;
+  }
+}
+
+.list-load-more {
+  margin: 0.15rem 0.85rem 0.85rem;
+  min-height: 48px;
+  width: calc(100% - 1.7rem);
+  flex-shrink: 0;
+}
+.list-load-more[hidden] { display: none !important; }
 
 .swap-card {
   background: var(--card);
@@ -2728,10 +2841,13 @@ body.modal-open .bmc-float {
 }
 
 @media (max-width: 380px) {
-  .bmc-float-label { display: none; }
-  .bmc-float { padding: 0.3rem; }
   .bmc-cta { width: 100%; justify-content: center; }
   .bmc-card { flex-direction: column; align-items: flex-start; }
+}
+
+/* Footer already has the coffee card. Hide the floating one on small screens. */
+@media (max-width: 899px) {
+  .bmc-float { display: none !important; }
 }
 
 @media (prefers-reduced-motion: reduce) {

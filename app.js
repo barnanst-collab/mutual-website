@@ -35,6 +35,10 @@
   // Set by Near Me. Null means show the whole filtered list.
   let nearMeCenter = null;
   const NEAR_ME_MILES = 150;
+  // The list shows a page at a time. The map uses that same page.
+  const LIST_PAGE = 8;
+  let listShown = LIST_PAGE;
+  let listQueryKey = "";
   let currentDmSwap = null;
   let currentDmAddressId = null;
   let currentDmSig = "";
@@ -87,7 +91,7 @@
       swaps = swaps.map(withPinCoords);
       swapsLoaded = true;
       refreshViews();
-      forceMapRefresh(getFilteredSwaps());
+      forceMapRefresh();
       console.log("[PostSwap] loaded swaps from Supabase:", swaps.length);
       return { ok: true, source: "supabase", count: swaps.length };
     } catch (err) {
@@ -105,7 +109,7 @@
       setExploreLoading(false);
       // One more refresh after loading spinner hides (layout size changes)
       setTimeout(function () {
-        forceMapRefresh(getFilteredSwaps());
+        forceMapRefresh();
       }, 100);
     }
   }
@@ -149,8 +153,10 @@
     modeComing: $("#mode-coming"),
     mapModeHelp: $("#map-mode-help"),
     listModeNote: $("#list-mode-note"),
+    swapSort: $("#swap-sort"),
     swapList: $("#swap-list"),
     listCount: $("#list-count"),
+    loadMore: $("#swap-load-more"),
     overlay: $("#modal-overlay"),
     modalPost: $("#modal-post"),
     modalDm: $("#modal-dm"),
@@ -358,7 +364,8 @@
   /** Invalidate map size and fit pins after data load / layout */
   function forceMapRefresh(filtered) {
     if (!map) return;
-    var list = filtered || getFilteredSwaps();
+    // No argument means the same page the list is showing. Pass [] to clear.
+    var list = filtered == null ? windowedSwaps(getFilteredSwaps()) : filtered;
     // Multiple passes help when the explore panel was hidden during first paint
     var pass = function () {
       try {
@@ -1172,6 +1179,75 @@
     return placed;
   }
 
+  function currentSort() {
+    var value = els.swapSort ? els.swapSort.value : "newest";
+    if (value === "closest" && !nearMeCenter) return "newest";
+    if (
+      value === "oldest" ||
+      value === "seniority-desc" ||
+      value === "seniority-asc" ||
+      value === "closest"
+    ) {
+      return value;
+    }
+    return "newest";
+  }
+
+  function syncSortControl() {
+    var sel = els.swapSort;
+    if (!sel) return;
+    var closest = sel.querySelector('option[value="closest"]');
+    if (closest) closest.disabled = !nearMeCenter;
+    if (!nearMeCenter && sel.value === "closest") sel.value = "newest";
+  }
+
+  function listQueryKeyFor() {
+    var city = els.filterCity ? (els.filterCity.value || "").trim() : "";
+    var craft = els.filterCraft ? els.filterCraft.value || "" : "";
+    var near = nearMeCenter
+      ? Number(nearMeCenter.lat).toFixed(3) + "," + Number(nearMeCenter.lng).toFixed(3)
+      : "";
+    return [currentSort(), mapMode, city, craft, near].join("|");
+  }
+
+  /** Reset the page when filters or sort change. Keep it when loading more. */
+  function windowedSwaps(filtered) {
+    var key = listQueryKeyFor();
+    if (key !== listQueryKey) {
+      listQueryKey = key;
+      listShown = LIST_PAGE;
+    }
+    return filtered.slice(0, listShown);
+  }
+
+  function swapTime(s) {
+    var t = Date.parse((s && (s.createdAt || s.created_at)) || "");
+    return isNaN(t) ? 0 : t;
+  }
+
+  function seniorityRank(s) {
+    var n = parseFloat(s && s.seniority);
+    return isNaN(n) ? 0 : n;
+  }
+
+  function compareSwaps(a, b) {
+    var sort = currentSort();
+    if (sort === "closest" && nearMeCenter) {
+      var da = milesBetween(nearMeCenter.lat, nearMeCenter.lng, activePin(a).lat, activePin(a).lng);
+      var db = milesBetween(nearMeCenter.lat, nearMeCenter.lng, activePin(b).lat, activePin(b).lng);
+      if (da !== db) return da - db;
+    } else if (sort === "oldest") {
+      if (swapTime(a) !== swapTime(b)) return swapTime(a) - swapTime(b);
+    } else if (sort === "seniority-desc") {
+      if (seniorityRank(a) !== seniorityRank(b)) return seniorityRank(b) - seniorityRank(a);
+    } else if (sort === "seniority-asc") {
+      if (seniorityRank(a) !== seniorityRank(b)) return seniorityRank(a) - seniorityRank(b);
+    } else if (swapTime(a) !== swapTime(b)) {
+      return swapTime(b) - swapTime(a);
+    }
+    return String(a.id).localeCompare(String(b.id));
+  }
+
   function getFilteredSwaps() {
     const city = (els.filterCity.value || "").trim().toLowerCase();
     const craft = els.filterCraft.value;
@@ -1196,25 +1272,7 @@
       return true;
     });
 
-    filtered.sort(function (a, b) {
-      if (nearMeCenter) {
-        var da = milesBetween(nearMeCenter.lat, nearMeCenter.lng, activePin(a).lat, activePin(a).lng);
-        var db = milesBetween(nearMeCenter.lat, nearMeCenter.lng, activePin(b).lat, activePin(b).lng);
-        if (da !== db) return da - db;
-      }
-      if (city) {
-        var rank = function (s) {
-          if (activeLocationText(s).toLowerCase().includes(city)) return 0;
-          if (otherLocationText(s).toLowerCase().includes(city)) return 1;
-          return 2;
-        };
-        var ra = rank(a);
-        var rb = rank(b);
-        if (ra !== rb) return ra - rb;
-      }
-      return activeLocationText(a).localeCompare(activeLocationText(b), undefined, { sensitivity: "base" });
-    });
-
+    filtered.sort(compareSwaps);
     return filtered;
   }
 
@@ -1254,6 +1312,7 @@
       els.nearMeBtn.classList.toggle("is-active", on);
       els.nearMeBtn.setAttribute("aria-pressed", on ? "true" : "false");
     }
+    syncSortControl();
   }
 
   function setMapMode(mode) {
@@ -1264,7 +1323,7 @@
     syncModeControls();
     refreshViews();
     if (nearMeCenter) zoomToMiles(nearMeCenter.lat, nearMeCenter.lng);
-    else forceMapRefresh(getFilteredSwaps());
+    else forceMapRefresh();
   }
 
   // ---------- Map ----------
@@ -1286,7 +1345,7 @@
     // Fix tiles when container becomes visible / resized.
     // Resize only recalculates size — refitting here would undo Near Me on phones.
     setTimeout(function () {
-      forceMapRefresh(getFilteredSwaps());
+      forceMapRefresh();
     }, 200);
     window.addEventListener("resize", function () {
       if (map) map.invalidateSize();
@@ -1538,11 +1597,14 @@
 
   // ---------- List ----------
   function renderList(filtered) {
+    var visible = windowedSwaps(filtered);
+    var total = filtered.length;
     els.listCount.textContent = nearMeCenter
-      ? `${filtered.length} near you`
-      : `${filtered.length} open`;
+      ? `${total} near you`
+      : `${total} open`;
 
-    if (!filtered.length) {
+    var more = els.loadMore;
+    if (!total) {
       const craftLabel = els.filterCraft && els.filterCraft.value ? " in this craft" : "";
       const emptyTitle = nearMeCenter ? "No swaps near you" : "No swaps match your filters";
       const emptyBody = nearMeCenter
@@ -1556,10 +1618,11 @@
           <p>${emptyBody}</p>
         </div>
       `;
-      return;
+      if (more) more.hidden = true;
+      return visible;
     }
 
-    els.swapList.innerHTML = filtered
+    els.swapList.innerHTML = visible
       .map((s) => {
         const isMine = userOwnsSwap(s);
         return `
@@ -1607,17 +1670,24 @@
       })
       .join("");
 
+    if (more) {
+      var left = total - visible.length;
+      more.hidden = left <= 0;
+      more.textContent = left > 0 ? "Load more (" + left + " left)" : "Load more";
+    }
+
     // Clear justAdded flags after paint
     filtered.forEach((s) => {
       if (s.justAdded) delete s.justAdded;
     });
+    return visible;
   }
 
   function refreshViews() {
     syncModeControls();
     const filtered = getFilteredSwaps();
-    renderList(filtered);
-    refreshMap(filtered);
+    const visible = renderList(filtered);
+    refreshMap(visible || []);
     // Keep map sized correctly after list/filter updates
     if (swapsLoaded && map) {
       setTimeout(function () {
@@ -1641,7 +1711,7 @@
     nearMeCenter = null;
     syncModeControls();
     refreshViews();
-    forceMapRefresh(getFilteredSwaps());
+    forceMapRefresh();
     if (!silent) {
       showToast("Near Me off", "Showing swaps across the country again.");
     }
@@ -3097,7 +3167,7 @@
 
   function refreshPublicSwaps() {
     refreshViews();
-    forceMapRefresh(getFilteredSwaps());
+    forceMapRefresh();
   }
 
   function replaceSwap(next) {
@@ -3990,6 +4060,18 @@
       link.addEventListener("click", () => closeMobileMenu());
     });
 
+    function openTransferRules() {
+      var box = document.getElementById("transfer-rules");
+      if (box) box.open = true;
+    }
+    $$('a[href="#regulations"]').forEach(function (link) {
+      link.addEventListener("click", openTransferRules);
+    });
+    if (location.hash === "#regulations") openTransferRules();
+    window.addEventListener("hashchange", function () {
+      if (location.hash === "#regulations") openTransferRules();
+    });
+
     // Navbar scroll state
     const onScroll = () => {
       els.navbar.classList.toggle("scrolled", window.scrollY > 8);
@@ -4006,8 +4088,24 @@
         nearMeCenter = null;
       }
       refreshViews();
-      if (hadNear && !nearMeCenter) forceMapRefresh(getFilteredSwaps());
+      if (hadNear && !nearMeCenter) forceMapRefresh();
     });
+    if (els.swapSort) {
+      els.swapSort.addEventListener("change", function () {
+        if (els.swapSort.value === "closest" && !nearMeCenter) {
+          els.swapSort.value = "newest";
+        }
+        activeSwapId = null;
+        listQueryKey = "";
+        refreshViews();
+      });
+    }
+    if (els.loadMore) {
+      els.loadMore.addEventListener("click", function () {
+        listShown += LIST_PAGE;
+        refreshViews();
+      });
+    }
     els.filterCraft.addEventListener("change", () => {
       activeSwapId = null;
       refreshViews();

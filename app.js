@@ -35,10 +35,11 @@
   // Set by Near Me. Null means show the whole filtered list.
   let nearMeCenter = null;
   const NEAR_ME_MILES = 150;
-  // The list shows a page at a time. The map uses that same page.
+  // The list shows a page at a time. The map plots every swap that matches.
   const LIST_PAGE = 8;
   let listShown = LIST_PAGE;
   let listQueryKey = "";
+  let linkedSwapHandled = false;
   let currentDmSwap = null;
   let currentDmAddressId = null;
   let currentDmSig = "";
@@ -111,6 +112,7 @@
       setTimeout(function () {
         forceMapRefresh();
       }, 100);
+      queueLinkedSwap();
     }
   }
 
@@ -364,8 +366,8 @@
   /** Invalidate map size and fit pins after data load / layout */
   function forceMapRefresh(filtered) {
     if (!map) return;
-    // No argument means the same page the list is showing. Pass [] to clear.
-    var list = filtered == null ? windowedSwaps(getFilteredSwaps()) : filtered;
+    // No argument means every swap that matches the filters. Pass [] to clear.
+    var list = filtered == null ? getFilteredSwaps() : filtered;
     // Multiple passes help when the explore panel was hidden during first paint
     var pass = function () {
       try {
@@ -1402,7 +1404,7 @@
   }
 
   function shareUrlFor(s) {
-    return `https://postswap.app/swap/${s.id}`;
+    return `https://post-swap.com/swap/${s.id}`;
   }
 
   function buildShareText(s) {
@@ -1532,6 +1534,8 @@
       });
       marker.on("click", () => {
         setActiveSwap(s.id, { fromMap: true });
+        // Open the popup even when this swap’s card is still on a later page.
+        marker.openPopup();
       });
       marker.on("popupopen", (e) => {
         const root = e.popup && e.popup.getElement ? e.popup.getElement() : null;
@@ -1686,8 +1690,8 @@
   function refreshViews() {
     syncModeControls();
     const filtered = getFilteredSwaps();
-    const visible = renderList(filtered);
-    refreshMap(visible || []);
+    renderList(filtered);
+    refreshMap(filtered);
     // Keep map sized correctly after list/filter updates
     if (swapsLoaded && map) {
       setTimeout(function () {
@@ -1696,6 +1700,76 @@
         } catch (_) { /* ignore */ }
       }, 0);
     }
+    clearFabFromLoadMore();
+  }
+
+  /** Hide Quick Post while it sits on top of Load more, so the button can be tapped. */
+  function clearFabFromLoadMore() {
+    var fab = document.getElementById("fab-quick-post");
+    var more = document.getElementById("swap-load-more");
+    if (!fab || !more) return;
+    var narrow = window.matchMedia("(max-width: 700px)").matches;
+    if (!narrow || more.hidden) {
+      fab.classList.remove("fab-yield");
+      return;
+    }
+    var a = more.getBoundingClientRect();
+    var b = fab.getBoundingClientRect();
+    var overlap =
+      a.width > 0 &&
+      a.height > 0 &&
+      a.bottom > b.top + 2 &&
+      a.top < b.bottom - 2 &&
+      a.right > b.left + 2 &&
+      a.left < b.right - 2;
+    fab.classList.toggle("fab-yield", overlap);
+  }
+
+  function swapIdFromLocation() {
+    var path = window.location.pathname || "";
+    try {
+      path = decodeURIComponent(path);
+    } catch (_) { /* keep the raw path */ }
+    var match = path.match(/\/swap\/([^/]+)\/?$/i);
+    return match ? match[1] : "";
+  }
+
+  function queueLinkedSwap() {
+    if (linkedSwapHandled || !swapIdFromLocation()) return;
+    // Wait until the map’s fit passes finish, then open the shared swap.
+    setTimeout(openLinkedSwap, 900);
+  }
+
+  function openLinkedSwap() {
+    if (linkedSwapHandled) return;
+    var id = swapIdFromLocation();
+    if (!id) return;
+    linkedSwapHandled = true;
+    var explore = document.getElementById("explore");
+    if (explore && explore.scrollIntoView) {
+      explore.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    var swap = null;
+    for (var i = 0; i < swaps.length; i++) {
+      if (idEq(swaps[i].id, id)) {
+        swap = swaps[i];
+        break;
+      }
+    }
+    if (!swap || !swapIsPublic(swap)) {
+      showToast("That swap is no longer open", "Showing the swaps that are still open.");
+      return;
+    }
+    var filtered = getFilteredSwaps();
+    for (var j = 0; j < filtered.length; j++) {
+      if (idEq(filtered[j].id, swap.id) && j >= listShown) {
+        listShown = j + 1;
+        break;
+      }
+    }
+    activeSwapId = swap.id;
+    refreshViews();
+    setActiveSwap(swap.id, { fromMap: false, scrollList: true });
   }
 
   // ---------- Near Me ----------
@@ -4075,8 +4149,10 @@
     // Navbar scroll state
     const onScroll = () => {
       els.navbar.classList.toggle("scrolled", window.scrollY > 8);
+      clearFabFromLoadMore();
     };
     window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", clearFabFromLoadMore);
     onScroll();
 
     // Filters

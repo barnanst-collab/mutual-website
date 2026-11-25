@@ -2260,6 +2260,16 @@ textarea { resize: vertical; min-height: 90px; }
 }
 .list-load-more[hidden] { display: none !important; }
 
+/* Phone: keep Load more above the fixed Quick Post button. */
+@media (max-width: 700px) {
+  .explore {
+    padding-bottom: calc(8rem + env(safe-area-inset-bottom, 0px));
+  }
+  .list-load-more {
+    scroll-margin-bottom: calc(6.75rem + env(safe-area-inset-bottom, 0px));
+  }
+}
+
 .swap-card {
   background: var(--card);
   border: 1.5px solid var(--border-soft);
@@ -3445,6 +3455,14 @@ body.modal-open .fab-quick-post {
   opacity: 0;
   pointer-events: none;
   transform: scale(0.9) translateY(8px);
+}
+
+/* Step aside when Quick Post covers Load more. */
+@media (max-width: 700px) {
+  .fab-quick-post.fab-yield {
+    opacity: 0;
+    pointer-events: none;
+  }
 }
 
 @keyframes fabIn {

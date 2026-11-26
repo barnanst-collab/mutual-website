@@ -1,0 +1,4 @@
+-- Split. Do not run this file.
+-- Part A (additive, no RLS): supabase/migrations/20261125_rls_a.sql
+-- Part B (enable RLS, policies, revokes): supabase/migrations/20261125_rls_b.sql
+-- Run A first. Deploy the frontend and confirm the map. Then run B.

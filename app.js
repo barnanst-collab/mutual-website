@@ -2,17 +2,10 @@
    PostSwap — Interactive application logic
    ============================================ */
 
-// Re-export Supabase helper on window from the main script
+// Confirm the Supabase helper loaded before this file.
 (function ensurePostSwapDBOnWindow() {
   if (typeof window === "undefined") return;
-  if (window.PostSwapDB && typeof window.PostSwapDB.testAnonInserts === "function") {
-    // Keep stable global references for DevTools
-    var db = window.PostSwapDB;
-    window.PostSwapDB = db;
-    window.PostSwapDB.testAnonInserts = db.testAnonInserts.bind(db);
-    window.testAnonInserts = function () {
-      return window.PostSwapDB.testAnonInserts();
-    };
+  if (window.PostSwapDB && window.PostSwapDB.auth) {
     console.log("PostSwapDB ready");
     return;
   }
@@ -125,7 +118,7 @@
 
   function defaultUserFields(partial) {
     return {
-      state: "NV",
+      state: "",
       notifications: { ...DEFAULT_NOTIFICATIONS },
       ...partial,
       notifications: {
@@ -164,6 +157,7 @@
     modalDm: $("#modal-dm"),
     modalLogin: $("#modal-login"),
     modalRegister: $("#modal-register"),
+    modalSetPassword: $("#modal-set-password"),
     modalMySwaps: $("#modal-my-swaps"),
     modalInbox: $("#modal-inbox"),
     modalShare: $("#modal-share"),
@@ -200,6 +194,7 @@
     formPost: $("#form-post"),
     formLogin: $("#form-login"),
     formRegister: $("#form-register"),
+    formSetPassword: $("#form-set-password"),
     formDm: $("#form-dm"),
     formProfile: $("#form-profile"),
     chatBody: $("#chat-body"),
@@ -642,11 +637,11 @@
     if (
       useSupabase &&
       db() &&
-      user.email &&
+      user.id &&
       typeof db().fetchEmailQueueForUser === "function"
     ) {
       try {
-        const emails = await db().fetchEmailQueueForUser(user.email, 30);
+        const emails = await db().fetchEmailQueueForUser(user.id, 30);
         (emails || []).forEach(function (row) {
           const nid = "eq-" + String(row.id);
           const et = row.eventType || "email";
@@ -790,9 +785,7 @@
       e.stopPropagation();
     }
     if (!user) {
-      requireAuth(
-        "Sign up free to see real mailbox activity from your DMs and alerts."
-      );
+      requireAuth("Log in or join free to post / message.");
       return;
     }
     const open = els.mailboxPanel.hidden;
@@ -840,11 +833,6 @@
     }
   }
 
-  function newUserId() {
-    if (globalThis.crypto && crypto.randomUUID) return crypto.randomUUID();
-    return "user-" + Date.now() + "-" + Math.random().toString(36).slice(2, 9);
-  }
-
   async function persistProfileToSupabase(profile) {
     if (!useSupabase || !db() || !profile) return null;
     try {
@@ -867,9 +855,12 @@
 
   // ---------- Auth ----------
   function setLoggedIn(userData, { quiet, skipRemote } = {}) {
+    if (!userData || !userData.id) return;
     user = defaultUserFields(userData);
-    if (!user.id) user.id = newUserId();
-    // Persist a lightweight local copy
+    const displayName = user.name || "Carrier";
+    user.name = displayName;
+    if (!user.initials) user.initials = initials(displayName);
+    // Display cache only. A real session is required to stay signed in.
     try {
       localStorage.setItem("postswap_user", JSON.stringify(user));
     } catch (_) { /* ignore */ }
@@ -877,9 +868,10 @@
     els.authGuest.classList.add("hidden");
     els.authUser.classList.remove("hidden");
     els.userAvatar.textContent = user.initials;
+    const nameParts = displayName.split(" ");
     els.userName.textContent =
-      user.name.split(" ")[0] +
-      (user.name.split(" ")[1] ? " " + user.name.split(" ")[1][0] + "." : "");
+      nameParts[0] +
+      (nameParts[1] ? " " + nameParts[1][0] + "." : "");
     updateMobileAuth();
     updateGuestParticipateBanner();
     loadMailReadIds();
@@ -902,12 +894,13 @@
     if (!quiet) {
       showToast(
         "You're in",
-        `Welcome back, ${user.name.split(" ")[0]}! Check your mailbox for updates.`
+        `Welcome back, ${displayName.split(" ")[0]}! Check your mailbox for updates.`
       );
     }
   }
 
-  function setLoggedOut() {
+  function setLoggedOut({ quiet } = {}) {
+    const wasIn = !!user;
     user = null;
     try {
       localStorage.removeItem("postswap_user");
@@ -923,10 +916,12 @@
     stopMessagePoll();
     renderMailbox();
     if (swapsLoaded) refreshViews();
-    showToast(
-      "Signed out",
-      "You can still browse the map. Sign up free to post or message."
-    );
+    if (!quiet && wasIn) {
+      showToast(
+        "Signed out",
+        "You can still browse the map. Log in or join free to post / message."
+      );
+    }
   }
 
   function updateMobileAuth() {
@@ -950,16 +945,140 @@
     }
   }
 
-  function restoreSession() {
+  let recoveryReady = false;
+  let explicitLogout = false;
+
+  function showFormError(id, message) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.hidden = !message;
+    el.textContent = message || "";
+  }
+
+  function isSetPasswordPath() {
+    return /\/set-password\/?$/.test(window.location.pathname || "");
+  }
+
+  function recoveryHashError() {
+    return /error=|otp_expired|access_denied/i.test(String(window.location.hash || ""));
+  }
+
+  async function sessionUserId() {
+    if (!db() || !db().auth || typeof db().auth.getSession !== "function") return "";
+    try {
+      const session = await db().auth.getSession();
+      return (session && session.user && session.user.id) || "";
+    } catch (_) {
+      return "";
+    }
+  }
+
+  async function adoptSession(session, opts) {
+    const id = session && session.user && session.user.id;
+    if (!id) return;
+    let cached = null;
     try {
       const raw = localStorage.getItem("postswap_user");
-      if (raw) {
-        const saved = JSON.parse(raw);
-        if (saved && saved.name && saved.email) {
-          setLoggedIn(saved, { quiet: true });
-        }
-      }
+      if (raw) cached = JSON.parse(raw);
     } catch (_) { /* ignore */ }
+    if (!cached || String(cached.id) !== String(id)) {
+      try { localStorage.removeItem("postswap_user"); } catch (_) { /* ignore */ }
+      cached = null;
+    }
+    let profile = null;
+    if (db() && typeof db().fetchProfile === "function") {
+      try {
+        profile = await db().fetchProfile(id);
+      } catch (err) {
+        console.warn("[PostSwap] profile load failed", err);
+      }
+    }
+    const meta = (session.user && session.user.user_metadata) || {};
+    const email = (profile && profile.email) || session.user.email || (cached && cached.email) || "";
+    const name = (profile && profile.name) || meta.name || (cached && cached.name) || (email ? email.split("@")[0] : "Carrier");
+    const source = profile || {
+      id: id,
+      email: email,
+      name: name,
+      craft: meta.craft || (cached && cached.craft) || "",
+      station: meta.station || (cached && cached.station) || "",
+      state: meta.state || (cached && cached.state) || "",
+      initials: meta.initials || initials(name),
+      employeeId: meta.employee_id || (cached && cached.employeeId) || "",
+      notifications: (cached && cached.notifications) || { ...DEFAULT_NOTIFICATIONS },
+    };
+    setLoggedIn(source, {
+      quiet: !opts || opts.quiet !== false,
+      skipRemote: true,
+    });
+  }
+
+  function openSetPassword(opts) {
+    opts = opts || {};
+    const expired = !!opts.expired;
+    showFormError(
+      "set-password-error",
+      expired ? "That link has expired. Tap Forgot password to get a new one." : ""
+    );
+    if (els.formSetPassword) {
+      els.formSetPassword.querySelectorAll("input, button[type='submit']").forEach(function (el) {
+        el.disabled = expired;
+      });
+    }
+    if (els.modalSetPassword) openModal(els.modalSetPassword);
+  }
+
+  function clearCachedUser() {
+    user = null;
+    try { localStorage.removeItem("postswap_user"); } catch (_) { /* ignore */ }
+  }
+
+  async function restoreSession() {
+    const onSetPassword = isSetPasswordPath();
+    if (recoveryHashError()) {
+      clearCachedUser();
+      updateMobileAuth();
+      updateGuestParticipateBanner();
+      if (window.history && window.history.replaceState) {
+        window.history.replaceState({}, "", "/set-password");
+      }
+      openSetPassword({ expired: true });
+      return;
+    }
+    let session = null;
+    try {
+      session = db() && db().auth ? await db().auth.getSession() : null;
+    } catch (err) {
+      console.warn("[PostSwap] session read failed", err);
+    }
+    if (!session || !session.user || !session.user.id) {
+      clearCachedUser();
+      updateMobileAuth();
+      updateGuestParticipateBanner();
+      if (onSetPassword) openSetPassword({ expired: true });
+      return;
+    }
+    await adoptSession(session, { quiet: true });
+    if (onSetPassword || recoveryReady) openSetPassword();
+  }
+
+  function wireAuth() {
+    if (!db() || !db().auth || typeof db().auth.onChange !== "function") return;
+    db().auth.onChange(function (event) {
+      if (event === "PASSWORD_RECOVERY") {
+        recoveryReady = true;
+        openSetPassword();
+      } else if (event === "SIGNED_OUT") {
+        setLoggedOut({ quiet: !explicitLogout });
+        explicitLogout = false;
+      }
+    });
+  }
+
+  function authFailureMessage(err) {
+    const msg = String((err && err.message) || "");
+    const code = String((err && err.code) || "");
+    return { msg: msg, code: code };
   }
 
   // ---------- Profile & notifications ----------
@@ -1644,7 +1763,7 @@
                   ? "View listing"
                   : user
                     ? "I'm Interested → DM"
-                    : "Sign up to participate"
+                    : "Log in or join free"
               }
             </button>
             ${shareButtonHtml(s)}
@@ -1652,7 +1771,7 @@
           <p class="share-nudge">${
             user
               ? "Send to a buddy who might want this route!"
-              : "Map browsing is public — create a free account to DM or post."
+              : "Log in or join free to post / message."
           }</p>
         </article>
       `;
@@ -1823,6 +1942,7 @@
     els.modalDm,
     els.modalLogin,
     els.modalRegister,
+    els.modalSetPassword,
     els.modalMySwaps,
     els.modalInbox,
     els.modalShare,
@@ -2247,39 +2367,52 @@
     renderMailbox();
   }
 
+  function messageRecipientId(swap, addressId) {
+    const ownerId = swap && swap.ownerId ? String(swap.ownerId) : "";
+    const raw = addressId != null ? String(addressId) : "";
+    if (ownerId && ownerId !== "guest" && !isSelfAddress(ownerId)) {
+      if (!raw || idEq(raw, ownerId) || (swap.username && idEq(raw, swap.username))) {
+        return ownerId;
+      }
+    }
+    if (raw && raw !== "guest" && !isSelfAddress(raw)) return raw;
+    return "";
+  }
+
   async function deliverMessage(swap, addressId, text) {
-    if (!user) throw new Error("Sign in to send a message.");
+    const sessionId = await sessionUserId();
+    if (!sessionId || !user || String(user.id) !== String(sessionId)) {
+      throw new Error("Log in or join free to post / message.");
+    }
     if (!useSupabase || !db() || typeof db().sendMessage !== "function") {
       throw new Error("Messaging isn’t available right now.");
     }
     if (!swap || swap.id == null || String(swap.id).startsWith("local-")) {
       throw new Error("This swap isn’t saved on the server yet, so the message can’t be delivered.");
     }
-    if (!addressId) throw new Error("There’s no recipient on this conversation yet.");
-    if (isSelfAddress(addressId)) {
+    const toUser = messageRecipientId(swap, addressId);
+    if (!toUser) throw new Error("There’s no recipient on this conversation yet.");
+    if (isSelfAddress(toUser)) {
       throw new Error("Pick the other carrier’s conversation before replying.");
     }
     const saved = await db().sendMessage({
       swapId: swap.id,
-      senderId: user.id,
-      toUser: addressId,
+      senderId: sessionId,
+      toUser: toUser,
       body: text,
-      identityKeys: currentIdentityKeys(),
     });
     if (typeof db().notifyNewDm === "function") {
       try {
         const notify = await db().notifyNewDm({
           swap: swap,
           messageBody: text,
-          fromUser: user,
-          recipientId: addressId,
+          fromUser: Object.assign({}, user, { id: sessionId }),
+          recipientId: toUser,
         });
         if (notify && notify.queued > 0) {
           showToast(
             "Email notification queued",
-            notify.to
-              ? "DM alert queued for " + notify.to
-              : "They’ll be emailed if notifications are on."
+            "They’ll be emailed if notifications are on."
           );
         }
       } catch (notifyErr) {
@@ -2568,7 +2701,7 @@
 
   async function sendInboxReply(e) {
     if (e) e.preventDefault();
-    if (!requireAuth("Sign up free to send DMs to other carriers.")) return;
+    if (!requireAuth()) return;
     const thread = inboxThreads.find(function (t) { return t.key === activeInboxThreadKey; });
     const text = els.inboxReplyInput ? els.inboxReplyInput.value.trim() : "";
     if (!thread) return;
@@ -2620,13 +2753,7 @@
 
   async function openInbox(opts) {
     opts = opts || {};
-    if (
-      !requireAuth(
-        "Sign up free to open My Messages — only your DMs, private to you."
-      )
-    ) {
-      return;
-    }
+    if (!requireAuth()) return;
     if (opts.threadKey) pendingInboxThreadKey = String(opts.threadKey);
     if (opts.swapId) pendingInboxSwapId = String(opts.swapId);
     setMailboxOpen(false);
@@ -2791,14 +2918,10 @@
    * Gate participate actions (post, DM, inbox). Map browsing stays public.
    * @returns {boolean} true if logged in
    */
-  function requireAuth(detail) {
+  function requireAuth() {
     if (user) return true;
-    showToast(
-      "Sign up to participate",
-      detail ||
-        "Create a free account to post swaps, message carriers, and use My Messages. Browsing the map stays public."
-    );
-    openRegister();
+    showToast("Log in to continue", "Log in or join free to post / message.");
+    openLogin();
     return false;
   }
 
@@ -2810,11 +2933,7 @@
   }
 
   function openPostModal() {
-    if (
-      !requireAuth(
-        "Sign up free to post a swap and find mutual matches. Anyone can still browse the map."
-      )
-    ) {
+    if (!requireAuth()) {
       return;
     }
     const wasEditing = !!editingSwapId;
@@ -2843,9 +2962,7 @@
   }
 
   function openMySwaps(focusId) {
-    if (
-      !requireAuth("Sign up free to manage your posted swaps.")
-    ) {
+    if (!requireAuth()) {
       return;
     }
     const mine = swaps.filter(function (s) {
@@ -2999,11 +3116,7 @@
 
   async function openDm(swap, opts) {
     opts = opts || {};
-    if (
-      !requireAuth(
-        "Sign up free to message carriers about swaps. Browsing open listings stays public."
-      )
-    ) {
+    if (!requireAuth()) {
       return;
     }
     if (!swap) return;
@@ -3015,7 +3128,7 @@
     } else if (opts.threadKey) {
       currentDmAddressId = null;
     } else {
-      const raw = swap.ownerId || swap.username || "";
+      const raw = swap.ownerId ? String(swap.ownerId) : "";
       const synthetic = {
         swapId: swap.id,
         senderId: user ? user.id : "",
@@ -3084,7 +3197,7 @@
 
   async function sendDm(e) {
     e.preventDefault();
-    if (!requireAuth("Sign up free to send DMs to other carriers.")) return;
+    if (!requireAuth()) return;
     const text = els.dmInput.value.trim();
     if (!currentDmSwap) return;
     if (!text) {
@@ -3273,7 +3386,9 @@
     try {
       let next = Object.assign({}, swap, { status: "closed" });
       if (useSupabase && db() && typeof db().updateSwap === "function" && !String(swap.id).startsWith("local-")) {
-        next = await db().updateSwap(swap.id, { status: "closed" }, user.id);
+        const sessionId = await sessionUserId();
+        if (!sessionId) throw new Error("Log in or join free to post / message.");
+        next = await db().updateSwap(swap.id, { status: "closed" }, sessionId);
         next = Object.assign({}, swap, next, { status: "closed" });
       }
       replaceSwap(next);
@@ -3303,7 +3418,9 @@
     if (!ok) return;
     try {
       if (useSupabase && db() && typeof db().deleteSwap === "function" && !String(swap.id).startsWith("local-")) {
-        await db().deleteSwap(swap.id, user.id);
+        const sessionId = await sessionUserId();
+        if (!sessionId) throw new Error("Log in or join free to post / message.");
+        await db().deleteSwap(swap.id, sessionId);
       }
       swaps = swaps.filter(function (s) { return !idEq(s.id, swap.id); });
       if (idEq(activeSwapId, swap.id)) activeSwapId = null;
@@ -3609,9 +3726,11 @@
   async function handlePost(e) {
     e.preventDefault();
     console.log("[PostSwap] handlePost: form submit");
-    if (
-      !requireAuth("Sign up free to post a swap. Guests can still browse the map.")
-    ) {
+    if (!requireAuth()) return;
+    const sessionId = await sessionUserId();
+    if (!sessionId || !user || String(user.id) !== String(sessionId)) {
+      showToast("Log in to continue", "Log in or join free to post / message.");
+      openLogin();
       return;
     }
 
@@ -3671,7 +3790,7 @@
       notes: notes || "Looking for a good mutual match.",
       region,
       privacyLabel: `Verified Carrier • ${region}`,
-      ownerId: user ? user.id : "guest",
+      ownerId: sessionId,
       status: "open",
       justAdded: true,
     });
@@ -3765,9 +3884,7 @@
       savedRemote ? "Swap posted to cloud!" : "Swap posted!",
       newSwap.locationColumnsMissing
         ? "The listing is saved. Add the location columns in Supabase so city, state, and coordinates are stored too."
-        : user
-          ? `You're live, ${user.name.split(" ")[0]}. Check My Swaps anytime.`
-          : "Your request is on the map. Login to manage it under My Swaps."
+        : `You're live, ${user.name.split(" ")[0]}. Check My Swaps anytime.`
     );
 
     // Email carriers: same home state AND exact craft match only
@@ -3780,7 +3897,7 @@
       try {
         const matchNotify = await db().notifyMatchingSwap({
           swap: newSwap,
-          excludeUserId: user ? user.id : null,
+          excludeUserId: sessionId,
         });
         console.log("[PostSwap] handlePost: matching-swap emails (state+craft)", matchNotify);
         if (matchNotify && matchNotify.queued > 0) {
@@ -3831,7 +3948,7 @@
           seniority: fields.seniority,
           notes: notes,
           swapType: fields.swapType,
-        }, user.id);
+        }, await sessionUserId());
         next = Object.assign({}, existing, saved, {
           swapType: fields.swapType,
           status: (saved && saved.status) || existing.status || "open",
@@ -3883,7 +4000,13 @@
         e.preventDefault();
         closeMobileMenu();
         closeAllModals();
-        setLoggedOut();
+        explicitLogout = true;
+        Promise.resolve(db() && db().auth ? db().auth.signOut() : null)
+          .catch(function () {})
+          .then(function () {
+            if (user) setLoggedOut();
+            explicitLogout = false;
+          });
         break;
       case "show-my-swaps":
         e.preventDefault();
@@ -4308,71 +4431,161 @@
     els.formLogin.addEventListener("submit", async (e) => {
       e.preventDefault();
       const email = $("#login-email").value.trim();
+      const password = $("#login-password").value;
       const submitBtn = els.formLogin.querySelector('button[type="submit"]');
+      showFormError("login-error", "");
+      showFormError("login-notice", "");
       setButtonLoading(submitBtn, true);
-
-      let profile = null;
-      if (useSupabase && db()) {
-        try {
-          profile = await db().fetchProfileByEmail(email);
-        } catch (err) {
-          console.warn("Profile lookup failed:", err);
+      try {
+        if (!db() || !db().auth) throw new Error("Sign-in isn’t available right now.");
+        await db().auth.signIn(email, password);
+        const session = await db().auth.getSession();
+        if (!session || !session.user || !session.user.id) {
+          throw new Error("Sign-in didn’t return a session.");
         }
-      }
-
-      if (profile) {
-        setLoggedIn(
-          {
-            ...profile,
-            notifications: profile.notifications || { ...DEFAULT_NOTIFICATIONS },
-          },
-          { skipRemote: true }
+        await adoptSession(session, { quiet: false });
+        setButtonLoading(submitBtn, false);
+        closeAllModals();
+      } catch (err) {
+        setButtonLoading(submitBtn, false);
+        const info = authFailureMessage(err);
+        if (/email not confirmed/i.test(info.msg) || info.code === "email_not_confirmed") {
+          showFormError("login-error", "Check your email to confirm your account first.");
+          try {
+            await db().auth.resendSignup(email);
+          } catch (resendErr) {
+            console.warn("[PostSwap] signup resend failed", resendErr);
+          }
+          return;
+        }
+        showFormError(
+          "login-error",
+          "That email and password don't match. First time logging in since the update? Tap Forgot password to set one."
         );
-      } else {
-        const namePart = email.split("@")[0] || "Carrier";
-        const pretty = namePart
-          .replace(/[._]/g, " ")
-          .replace(/\b\w/g, (c) => c.toUpperCase());
-        setLoggedIn({
-          id: newUserId(),
-          name: pretty,
-          email,
-          craft: "Letter Carrier",
-          station: "Local Station",
-          state: "NV",
-          initials: initials(pretty),
-          notifications: { ...DEFAULT_NOTIFICATIONS },
-        });
       }
-      setButtonLoading(submitBtn, false);
-      closeAllModals();
     });
+
+    const forgotBtn = $("#forgot-password");
+    if (forgotBtn) {
+      forgotBtn.addEventListener("click", async function () {
+        const email = $("#login-email").value.trim();
+        showFormError("login-error", "");
+        if (!email) {
+          showFormError("login-notice", "Enter your email, then tap Forgot password.");
+          return;
+        }
+        forgotBtn.disabled = true;
+        try {
+          if (db() && db().auth) await db().auth.resetPassword(email);
+        } catch (err) {
+          console.warn("[PostSwap] reset password request failed", err);
+        }
+        forgotBtn.disabled = false;
+        showFormError(
+          "login-notice",
+          "If that email is on PostSwap, we sent a link to set your password."
+        );
+      });
+    }
 
     els.formRegister.addEventListener("submit", async (e) => {
       e.preventDefault();
       const name = $("#reg-name").value.trim();
       const email = $("#reg-email").value.trim();
+      const password = $("#reg-password").value;
       const submitBtn = els.formRegister.querySelector('button[type="submit"]');
+      showFormError("register-error", "");
+      showFormError("register-note", "");
+      if (password.length < 8) {
+        showFormError("register-error", "Use at least 8 characters.");
+        return;
+      }
       setButtonLoading(submitBtn, true);
-
-      setLoggedIn({
-        id: newUserId(),
-        name,
-        email,
-        craft: $("#reg-craft").value,
-        station: $("#reg-station").value.trim(),
-        state: "NV",
-        initials: initials(name),
-        employeeId: ($("#reg-eid") && $("#reg-eid").value.trim()) || "",
-        notifications: { ...DEFAULT_NOTIFICATIONS },
-      });
-      setButtonLoading(submitBtn, false);
-      closeAllModals();
-      showToast(
-        "Account created",
-        `Profile saved${useSupabase ? " to Supabase" : ""}. Email alerts enabled for ${email}.`
-      );
+      try {
+        if (!db() || !db().auth) throw new Error("Sign-up isn’t available right now.");
+        const data = await db().auth.signUp({
+          email: email,
+          password: password,
+          options: {
+            emailRedirectTo: "https://post-swap.com/",
+            data: {
+              name: name,
+              craft: $("#reg-craft").value,
+              station: $("#reg-station").value.trim(),
+              state: "",
+              initials: initials(name),
+              employee_id: ($("#reg-eid") && $("#reg-eid").value.trim()) || "",
+            },
+          },
+        });
+        const session = (data && data.session) || (await db().auth.getSession());
+        if (session && session.user && session.user.id) {
+          await adoptSession(session, { quiet: false });
+          setButtonLoading(submitBtn, false);
+          closeAllModals();
+          return;
+        }
+        setButtonLoading(submitBtn, false);
+        showFormError(
+          "register-note",
+          "Check your email to confirm your account. Already a member? Use Forgot password on the login screen. You don't need to sign up again."
+        );
+      } catch (err) {
+        setButtonLoading(submitBtn, false);
+        const info = authFailureMessage(err);
+        if (/already registered|already been registered|user already/i.test(info.msg)) {
+          showFormError(
+            "register-note",
+            "Check your email to confirm your account. Already a member? Use Forgot password on the login screen. You don't need to sign up again."
+          );
+          return;
+        }
+        showFormError("register-error", info.msg || "Couldn’t create that account.");
+      }
     });
+
+    if (els.formSetPassword) {
+      els.formSetPassword.addEventListener("submit", async function (e) {
+        e.preventDefault();
+        const password = $("#set-password").value;
+        const confirm = $("#set-password-confirm").value;
+        const submitBtn = els.formSetPassword.querySelector('button[type="submit"]');
+        showFormError("set-password-error", "");
+        if (password.length < 8) {
+          showFormError("set-password-error", "Use at least 8 characters.");
+          return;
+        }
+        if (password !== confirm) {
+          showFormError("set-password-error", "Those passwords don’t match.");
+          return;
+        }
+        setButtonLoading(submitBtn, true);
+        try {
+          if (!db() || !db().auth) throw new Error("Password update isn’t available right now.");
+          await db().auth.updatePassword(password);
+          recoveryReady = false;
+          if (window.history && window.history.replaceState) {
+            window.history.replaceState({}, "", "/");
+          }
+          const session = await db().auth.getSession();
+          if (session && session.user) await adoptSession(session, { quiet: true });
+          setButtonLoading(submitBtn, false);
+          closeAllModals();
+          showToast("Password set. You're logged in.", "You can post and message with this account.");
+        } catch (err) {
+          setButtonLoading(submitBtn, false);
+          const info = authFailureMessage(err);
+          if (/expired|invalid|otp/i.test(info.msg) || info.code === "otp_expired") {
+            showFormError(
+              "set-password-error",
+              "That link has expired. Tap Forgot password to get a new one."
+            );
+            return;
+          }
+          showFormError("set-password-error", info.msg || "Couldn’t set that password.");
+        }
+      });
+    }
 
   }
 
@@ -4419,18 +4632,11 @@
 
   // ---------- Init ----------
   async function init() {
-    // Ensure global is still attached when the app boots
-    if (typeof window !== "undefined" && window.PostSwapDB) {
-      window.PostSwapDB = window.PostSwapDB;
-      if (typeof window.PostSwapDB.testAnonInserts === "function") {
-        console.log("PostSwapDB ready");
-      }
-    }
-
     initMap();
     bindEvents();
     updateMobileAuth();
-    restoreSession();
+    wireAuth();
+    await restoreSession();
     updateGuestParticipateBanner();
     renderMailbox();
     refreshViews(); // empty state until load finishes

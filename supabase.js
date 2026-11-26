@@ -1,21 +1,111 @@
 /* ============================================
    PostSwap — Supabase REST helpers (fetch API)
-   BUILD: 2026-07-11c (email notifications)
+   BUILD: 2026-11-25auth
+   Auth is Supabase Auth (anon key + user access token).
    Matched to existing project tables:
      - public.swaps
      - public."messages (for DMs)"
-   Profiles use public.profiles when available.
+   Profiles use public.profiles for the signed-in user
+   and public.profiles_public for display names.
    ============================================ */
 
 (function (global) {
   "use strict";
 
-  const BUILD = "2026-11-24loc";
+  const BUILD = "2026-11-25auth";
   const SUPABASE_URL = "https://olfystbcngdcevtndkdq.supabase.co";
   const SUPABASE_ANON_KEY =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9sZnlzdGJjbmdkY2V2dG5ka2RxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM2MzE5NTMsImV4cCI6MjA5OTIwNzk1M30.Kr47X97Wrpppt2Vs-XhOzYMsQD8PmAPwbuWEyG8xEAk";
+  const SITE_URL = "https://post-swap.com";
+  const PASSWORD_REDIRECT = SITE_URL + "/set-password";
 
   const REST = `${SUPABASE_URL}/rest/v1`;
+
+  let authClient = null;
+  if (global.supabase && typeof global.supabase.createClient === "function") {
+    authClient = global.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+        flowType: "implicit",
+      },
+    });
+  }
+
+  function requireAuthClient() {
+    if (!authClient) {
+      const err = new Error("Sign-in isn’t available right now.");
+      err.status = 503;
+      throw err;
+    }
+    return authClient;
+  }
+
+  function asAuthError(error) {
+    const err = new Error((error && error.message) || "Auth request failed");
+    err.code = error && (error.code || error.error_code);
+    err.status = error && error.status;
+    return err;
+  }
+
+  const auth = {
+    signIn: async function (email, password) {
+      const result = await requireAuthClient().auth.signInWithPassword({
+        email: email,
+        password: password,
+      });
+      if (result.error) throw asAuthError(result.error);
+      return result.data;
+    },
+    signUp: async function (args) {
+      const input = args || {};
+      const result = await requireAuthClient().auth.signUp({
+        email: input.email,
+        password: input.password,
+        options: input.options || {},
+      });
+      if (result.error) throw asAuthError(result.error);
+      return result.data;
+    },
+    signOut: async function () {
+      const result = await requireAuthClient().auth.signOut();
+      if (result.error) throw asAuthError(result.error);
+    },
+    resetPassword: async function (email) {
+      const result = await requireAuthClient().auth.resetPasswordForEmail(email, {
+        redirectTo: PASSWORD_REDIRECT,
+      });
+      if (result.error) throw asAuthError(result.error);
+      return result.data;
+    },
+    updatePassword: async function (password) {
+      const result = await requireAuthClient().auth.updateUser({ password: password });
+      if (result.error) throw asAuthError(result.error);
+      return result.data;
+    },
+    getSession: async function () {
+      if (!authClient) return null;
+      const result = await authClient.auth.getSession();
+      if (result.error) throw asAuthError(result.error);
+      return (result.data && result.data.session) || null;
+    },
+    onChange: function (callback) {
+      if (!authClient) {
+        return { data: { subscription: { unsubscribe: function () {} } } };
+      }
+      return authClient.auth.onAuthStateChange(callback);
+    },
+    resendSignup: async function (email) {
+      const result = await requireAuthClient().auth.resend({
+        type: "signup",
+        email: email,
+        options: { emailRedirectTo: SITE_URL + "/" },
+      });
+      if (result.error) throw asAuthError(result.error);
+      return result.data;
+    },
+  };
 
   /** Encode a table name for the REST path, including spaces and parentheses. */
   function encodeRestSegment(name) {
@@ -27,44 +117,33 @@
   // public."messages (for DMs)" — never request this table without a participant filter.
   const MESSAGES_TABLE = encodeRestSegment("messages (for DMs)");
 
-  /** UTF-8 base64 so identity keys (including “•”) are a legal HTTP header value. */
-  function utf8ToB64(str) {
+  async function bearerToken() {
     try {
-      return btoa(unescape(encodeURIComponent(str)));
+      const session = await auth.getSession();
+      const token = session && session.access_token;
+      if (token) return token;
     } catch (_) {
-      return btoa(String(str));
+      /* The public anon key still authorizes reads of open swaps. */
     }
+    return SUPABASE_ANON_KEY;
   }
 
-  /** Header the messages RLS policy reads. Keys are joined with “|” then base64-encoded. */
-  function participantKeysHeader(keys) {
-    try {
-      const joined = (keys || [])
-        .map(function (k) {
-          return k == null ? "" : String(k).trim().replace(/\|/g, "/");
-        })
-        .filter(Boolean)
-        .join("|");
-      if (!joined) return {};
-      return { "x-postswap-keys": utf8ToB64(joined) };
-    } catch (_) {
-      return {};
-    }
-  }
-
-  function headers(extra = {}) {
-    return {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-      "Content-Type": "application/json",
-      ...extra,
-    };
+  function headers(extra, token) {
+    return Object.assign(
+      {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: "Bearer " + (token || SUPABASE_ANON_KEY),
+        "Content-Type": "application/json",
+      },
+      extra || {}
+    );
   }
 
   async function request(path, options = {}) {
     const method = (options.method || "GET").toUpperCase();
     const url = `${REST}${path}`;
-    const hdrs = headers(options.headers || {});
+    const token = await bearerToken();
+    const hdrs = headers(options.headers || {}, token);
 
     console.log(`[PostSwapDB] ${method} ${url}`, {
       body: options.body ? safeParse(options.body) : undefined,
@@ -434,6 +513,11 @@
   }
 
   async function createSwap(swap) {
+    if (!swap || swap.ownerId == null || String(swap.ownerId).trim() === "" || String(swap.ownerId) === "guest") {
+      const err = new Error("Log in or join free to post / message.");
+      err.status = 401;
+      throw err;
+    }
     const body = mapSwapToDb(swap);
     console.log("[PostSwapDB] createSwap payload →", body);
     try {
@@ -456,7 +540,7 @@
         data: err && err.data,
         payload: body,
         tip:
-          "If status is 401/403: disable RLS on public.swaps (see supabase-schema.sql). " +
+          "If status is 401/403: the swap must be posted as the signed-in user. " +
           "If 400: column mismatch. If network: check CORS / project URL.",
       });
       throw err;
@@ -583,8 +667,23 @@
   }
 
   /**
+   * Server filter is the auth user id. Email and display-name keys stay local
+   * for labeling. They are not sent as a stand-in for auth.uid().
+   */
+  function serverParticipantKeys(userOrKeys) {
+    if (Array.isArray(userOrKeys)) {
+      const ids = userOrKeys.filter(function (k) {
+        return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(k || ""));
+      });
+      return ids.length ? [String(ids[0])] : [];
+    }
+    if (userOrKeys && userOrKeys.id) return [String(userOrKeys.id)];
+    return [];
+  }
+
+  /**
    * Identity keys for the logged-in user (id, username-style labels, email, name).
-   * Used so older rows stored under username still match.
+   * Used so older rows stored under username still match on screen.
    */
   function userIdentityKeys(user) {
     if (!user) return [];
@@ -783,9 +882,7 @@
   async function fetchMessages(swapId, userOrKeys) {
     console.log("[PostSwapDB] fetchMessages() swapId=", swapId, "userFilter=", !!userOrKeys);
     try {
-      const keys = Array.isArray(userOrKeys)
-        ? userOrKeys
-        : userIdentityKeys(userOrKeys);
+      const keys = serverParticipantKeys(userOrKeys);
       const orInner = userParticipationOrInner(keys);
       if (!orInner) {
         console.warn(
@@ -805,7 +902,7 @@
         orInner +
         ")&select=*&order=created_at.asc";
 
-      const rows = await request(path, { headers: participantKeysHeader(keys) });
+      const rows = await request(path);
 
       const keySet = keySetFromList(keys);
       const mapped = (rows || [])
@@ -833,7 +930,7 @@
    */
   async function fetchMessagesForUser(user, limit) {
     const lim = Math.min(Math.max(Number(limit) || 200, 1), 500);
-    const keys = userIdentityKeys(user);
+    const keys = serverParticipantKeys(user);
     console.log("[PostSwapDB] fetchMessagesForUser()", { keys: keys, limit: lim });
 
     if (!keys.length) {
@@ -854,7 +951,7 @@
         lim;
 
       // Participant filter is required. Do not load the recent-messages table into the browser.
-      const rows = await request(path, { headers: participantKeysHeader(keys) });
+      const rows = await request(path);
 
       const mapped = (rows || []).map(mapMessageRow);
       const filtered = mapped.filter(function (m) {
@@ -877,14 +974,6 @@
       });
       throw err;
     }
-  }
-
-  /** Refuses an unfiltered messages read. Inbox must use fetchMessagesForUser. */
-  async function fetchAllMessages() {
-    console.warn(
-      "[PostSwapDB] fetchAllMessages refused — messages are loaded only for the signed-in participant"
-    );
-    return [];
   }
 
   /** Per-account read ids stored on profiles.dm_read_ids when that column exists. */
@@ -930,22 +1019,21 @@
     }
   }
 
-  /** Recent email_queue rows for this user's email (real notification activity). */
-  async function fetchEmailQueueForUser(email, limit) {
-    if (!email) return [];
+  /** Recent email_queue rows for this signed-in user. */
+  async function fetchEmailQueueForUser(userId, limit) {
+    if (!userId) return [];
     const lim = Math.min(Math.max(Number(limit) || 30, 1), 100);
-    console.log("[PostSwapDB] fetchEmailQueueForUser()", email);
+    console.log("[PostSwapDB] fetchEmailQueueForUser()", userId);
     try {
       const rows = await request(
-        "/email_queue?to_email=eq." +
-          encodeURIComponent(String(email)) +
-          "&select=*&order=created_at.desc&limit=" +
+        "/email_queue?to_user_id=eq." +
+          encodeURIComponent(String(userId)) +
+          "&select=id,to_user_id,subject,body,event_type,status,created_at,meta&order=created_at.desc&limit=" +
           lim
       );
       return (rows || []).map(function (r) {
         return {
           id: r.id,
-          toEmail: r.to_email,
           subject: r.subject,
           body: r.body,
           eventType: r.event_type,
@@ -962,25 +1050,28 @@
     }
   }
 
-  async function sendMessage({ swapId, senderId, toUser, body, identityKeys }) {
+  async function sendMessage({ swapId, senderId, toUser, body }) {
+    if (!senderId || String(senderId) === "guest" || String(senderId) === "anonymous") {
+      const err = new Error("Log in or join free to post / message.");
+      err.status = 401;
+      throw err;
+    }
+    if (!toUser || String(toUser) === "guest") {
+      const err = new Error("There’s no recipient on this conversation yet.");
+      err.status = 400;
+      throw err;
+    }
     const payload = {
       swap_id: String(swapId),
-      from_user: senderId || "anonymous",
-      to_user: toUser || null,
+      from_user: String(senderId),
+      to_user: String(toUser),
       message: body,
     };
-    const keys =
-      identityKeys && identityKeys.length
-        ? identityKeys
-        : [senderId].filter(Boolean);
     console.log("[PostSwapDB] sendMessage payload →", payload);
     try {
       const rows = await request(`/${MESSAGES_TABLE}`, {
         method: "POST",
-        headers: Object.assign(
-          { Prefer: "return=representation" },
-          participantKeysHeader(keys)
-        ),
+        headers: { Prefer: "return=representation" },
         body: JSON.stringify(payload),
       });
       const r = Array.isArray(rows) ? rows[0] : rows;
@@ -1004,8 +1095,7 @@
         status: err && err.status,
         data: err && err.data,
         payload,
-        tip:
-          'If status is 401/403: messages RLS only allows rows whose from_user or to_user is in the x-postswap-keys header (see supabase-schema.sql).',
+        tip: "If status is 401/403: from_user must be the signed-in user id.",
       });
       throw err;
     }
@@ -1065,7 +1155,14 @@
   }
 
   async function saveProfile(profile) {
-    const body = mapProfileToDb(profile);
+    const session = await auth.getSession();
+    const uid = session && session.user && session.user.id;
+    if (!uid) {
+      const err = new Error("Log in or join free to post / message.");
+      err.status = 401;
+      throw err;
+    }
+    const body = mapProfileToDb(Object.assign({}, profile, { id: uid }));
     console.log("[PostSwapDB] saveProfile payload →", body);
     try {
       const rows = await request("/profiles?on_conflict=id", {
@@ -1097,11 +1194,28 @@
     }
   }
 
+  function mapPublicProfile(row) {
+    if (!row || row.id == null) return null;
+    return {
+      id: row.id,
+      name: row.name || "",
+      email: "",
+      craft: row.craft || "",
+      station: row.station || "",
+      state: row.state || "",
+      initials: row.initials || "",
+      employeeId: "",
+      notifications: null,
+    };
+  }
+
   async function fetchAllProfiles() {
     console.log("[PostSwapDB] fetchAllProfiles()");
     try {
-      const rows = await request("/profiles?select=*&order=updated_at.desc&limit=500");
-      const mapped = (rows || []).map(mapProfileFromDb).filter(Boolean);
+      const rows = await request(
+        "/profiles_public?select=id,name,initials,craft,station,state&order=name.asc&limit=500"
+      );
+      const mapped = (rows || []).map(mapPublicProfile).filter(Boolean);
       console.log("[PostSwapDB] fetchAllProfiles count:", mapped.length);
       return mapped;
     } catch (err) {
@@ -1111,497 +1225,106 @@
     }
   }
 
-  // ---------- Email notifications (queue + optional Edge Function) ----------
-  function prefsOf(profile) {
-    const n = (profile && profile.notifications) || {};
-    return {
-      emailEnabled: n.emailEnabled !== false,
-      onInterest: n.onInterest !== false,
-      onStateSwap: n.onStateSwap !== false,
-      onDm: n.onDm !== false,
-    };
+
+  // ---------- Email notifications ----------
+  // The browser calls security-definer RPCs. It does not insert email_queue
+  // and it does not read other members' email addresses.
+  async function rpc(name, args) {
+    return request("/rpc/" + encodeURIComponent(name), {
+      method: "POST",
+      body: JSON.stringify(args || {}),
+    });
   }
 
-  function wantsEmail(profile, kind) {
-    if (!profile || !profile.email) return false;
-    const p = prefsOf(profile);
-    if (!p.emailEnabled) return false;
-    if (kind === "new_dm") return p.onDm;
-    if (kind === "matching_swap") return p.onStateSwap;
-    if (kind === "interest") return p.onInterest;
-    return false;
-  }
-
-  async function queueEmail({ toEmail, toUserId, subject, body, eventType, meta }) {
-    const payload = {
-      to_email: toEmail,
-      to_user_id: toUserId || null,
-      subject,
-      body,
-      event_type: eventType || "general",
-      meta: meta || {},
-      status: "pending",
-    };
-    console.log("[PostSwapDB] queueEmail →", payload);
-    try {
-      const rows = await request("/email_queue", {
-        method: "POST",
-        headers: { Prefer: "return=representation" },
-        body: JSON.stringify(payload),
-      });
-      const row = Array.isArray(rows) ? rows[0] : rows;
-      console.log("[PostSwapDB] queueEmail success", row);
-      return row;
-    } catch (err) {
-      console.error("[PostSwapDB] queueEmail FAILED", {
-        message: err && err.message,
-        status: err && err.status,
-        data: err && err.data,
-        tip: "Create public.email_queue via supabase-schema.sql",
-      });
-      throw err;
-    }
-  }
-
-  /** Best-effort: invoke Edge Function to flush pending queue (if deployed). */
+  /** Best-effort flush. dispatch-emails uses the service role on the server. */
   async function dispatchEmailQueue() {
     const url = `${SUPABASE_URL}/functions/v1/dispatch-emails`;
     console.log("[PostSwapDB] dispatchEmailQueue →", url);
     try {
+      const token = await bearerToken();
       const res = await fetch(url, {
         method: "POST",
         headers: {
           apikey: SUPABASE_ANON_KEY,
-          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+          Authorization: "Bearer " + token,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ process: true }),
       });
-      const text = await res.text();
+      const textBody = await res.text();
       let data = null;
       try {
-        data = text ? JSON.parse(text) : null;
-      } catch {
-        data = text;
+        data = textBody ? JSON.parse(textBody) : null;
+      } catch (parseErr) {
+        data = textBody;
       }
       console.log("[PostSwapDB] dispatchEmailQueue response", res.status, data);
-      return { ok: res.ok, status: res.status, data };
+      return { ok: res.ok, status: res.status, data: data };
     } catch (err) {
       console.warn("[PostSwapDB] dispatchEmailQueue unavailable", err && err.message);
       return { ok: false, skipped: true, message: err && err.message };
     }
   }
 
-  /**
-   * Notify swap owner of a new DM (if their profile opts in).
-   * @param {{ swap, messageBody, fromUser }} args
-   */
   async function notifyNewDm({ swap, messageBody, fromUser, recipientId }) {
     console.log("[PostSwapDB] notifyNewDm", {
       swapId: swap && swap.id,
-      fromUser,
       recipientId: recipientId || null,
     });
     if (!swap) return { queued: 0 };
-
     const senderId = fromUser && (fromUser.id || fromUser);
-    const explicit = recipientId != null && String(recipientId) !== "";
-    let recipient = null;
-
-    if (explicit && String(recipientId) !== String(senderId)) {
-      try {
-        recipient = await fetchProfile(recipientId);
-      } catch (err) {
-        console.warn("[PostSwapDB] notifyNewDm: recipient lookup failed", err);
-      }
+    let toId = recipientId != null && String(recipientId) !== "" ? String(recipientId) : "";
+    if ((!toId || toId === "guest") && swap.ownerId && String(swap.ownerId) !== String(senderId)) {
+      toId = String(swap.ownerId);
     }
-
-    const senderIsOwner =
-      !!(senderId && swap.ownerId && String(senderId) === String(swap.ownerId));
-
-    if (!recipient && !senderIsOwner && swap.ownerId && String(swap.ownerId) !== String(senderId)) {
-      try {
-        recipient = await fetchProfile(swap.ownerId);
-      } catch (err) {
-        console.warn("[PostSwapDB] notifyNewDm: owner lookup failed", err);
-      }
+    if (!toId || toId === "guest" || (senderId && String(toId) === String(senderId))) {
+      return { queued: 0, reason: "no_recipient" };
     }
-
-    // Fallback: match by username label when the sender is not the listing owner
-    if (!recipient && !senderIsOwner && swap.username) {
-      try {
-        const all = await fetchAllProfiles();
-        recipient = all.find(
-          (p) =>
-            p.name &&
-            swap.username &&
-            p.name.toLowerCase().includes(String(swap.username).split("•")[0].trim().toLowerCase())
-        ) || null;
-      } catch (_) { /* ignore */ }
-    }
-
-    if (!recipient || !wantsEmail(recipient, "new_dm")) {
-      console.log("[PostSwapDB] notifyNewDm: no recipient or prefs off", recipient);
-      return { queued: 0, reason: "no_recipient_or_prefs" };
-    }
-
-    // Don't email yourself
-    if (senderId && String(recipient.id) === String(senderId)) {
-      console.log("[PostSwapDB] notifyNewDm: skip self");
-      return { queued: 0, reason: "self" };
-    }
-
-    const route = `${swap.current || "?"} → ${swap.desired || "?"}`;
-    const fromName = (fromUser && fromUser.name) || "A verified carrier";
-    const subject = `New PostSwap DM on ${route}`;
+    const route = (swap.current || "?") + " → " + (swap.desired || "?");
+    const fromName = (fromUser && fromUser.name) || "A carrier";
+    const subject = "New PostSwap DM on " + route;
     const body = [
-      `Hi ${recipient.name || "Carrier"},`,
+      "Hi,",
       "",
-      `${fromName} sent you a message about a swap:`,
+      fromName + " sent you a message about a swap:",
       route,
       "",
-      `Message:`,
-      `"${messageBody || ""}"`,
+      "Message:",
+      '"' + (messageBody || "") + '"',
       "",
-      `Open PostSwap → Mailbox → My Messages to reply.`,
+      "Open PostSwap, then Mailbox, then My Messages to reply.",
       "",
-      `— PostSwap (built by carriers, for carriers)`,
-      `You're receiving this because email notifications are enabled in your profile.`,
+      "— PostSwap (built by carriers, for carriers)",
+      "You're receiving this because email notifications are enabled in your profile.",
     ].join("\n");
-
-    const row = await queueEmail({
-      toEmail: recipient.email,
-      toUserId: recipient.id,
-      subject,
-      body,
-      eventType: "new_dm",
-      meta: {
+    const result = await rpc("queue_notification", {
+      p_to_user_id: toId,
+      p_subject: subject,
+      p_body: body,
+      p_event: "new_dm",
+      p_meta: {
         swap_id: swap.id,
         from_user_id: senderId || null,
       },
     });
-
-    const dispatch = await dispatchEmailQueue();
-    return { queued: 1, row, dispatch, to: recipient.email };
+    const queued = result && result.queued ? result.queued : 0;
+    const dispatch = queued ? await dispatchEmailQueue() : { skipped: true };
+    return { queued: queued, dispatch: dispatch };
   }
 
-  function normalizeCraft(craft) {
-    return String(craft || "")
-      .trim()
-      .toLowerCase()
-      .replace(/\s+/g, " ");
+  async function notifyMatchingSwap({ swap }) {
+    console.log("[PostSwapDB] notifyMatchingSwap", { swapId: swap && swap.id });
+    if (!swap || swap.id == null) return { queued: 0 };
+    const result = await rpc("notify_matching_swap", { p_swap_id: String(swap.id) });
+    const queued = result && result.queued ? result.queued : 0;
+    const dispatch = queued ? await dispatchEmailQueue() : { skipped: true };
+    return { queued: queued, dispatch: dispatch };
   }
 
-  function craftsMatchExactly(a, b) {
-    const ca = normalizeCraft(a);
-    const cb = normalizeCraft(b);
-    if (!ca || !cb) return false;
-    // Strict exact match only — no "any craft" / partial / family matching
-    return ca === cb;
-  }
-
-  /**
-   * Notify carriers about a new swap ONLY when:
-   *  1) listing involves their home state, AND
-   *  2) craft exactly matches their profile craft
-   * (No "any craft" option.)
-   */
-  async function notifyMatchingSwap({ swap, excludeUserId }) {
-    console.log("[PostSwapDB] notifyMatchingSwap", {
-      swapId: swap && swap.id,
-      craft: swap && swap.craft,
-    });
-    if (!swap) return { queued: 0 };
-
-    const swapCraft = normalizeCraft(swap.craft);
-    if (!swapCraft) {
-      console.log("[PostSwapDB] notifyMatchingSwap: swap has no craft — skip");
-      return { queued: 0, reason: "no_swap_craft" };
-    }
-
-    let profiles = [];
-    try {
-      profiles = await fetchAllProfiles();
-    } catch (err) {
-      console.error("[PostSwapDB] notifyMatchingSwap: profiles failed", err);
-      return { queued: 0, error: err.message };
-    }
-
-    const hay = `${swap.current || ""} ${swap.desired || ""}`.toUpperCase();
-    const STATE_NAMES = {
-      AL: "ALABAMA", AK: "ALASKA", AZ: "ARIZONA", AR: "ARKANSAS", CA: "CALIFORNIA",
-      CO: "COLORADO", CT: "CONNECTICUT", DE: "DELAWARE", FL: "FLORIDA", GA: "GEORGIA",
-      HI: "HAWAII", ID: "IDAHO", IL: "ILLINOIS", IN: "INDIANA", IA: "IOWA",
-      KS: "KANSAS", KY: "KENTUCKY", LA: "LOUISIANA", ME: "MAINE", MD: "MARYLAND",
-      MA: "MASSACHUSETTS", MI: "MICHIGAN", MN: "MINNESOTA", MS: "MISSISSIPPI",
-      MO: "MISSOURI", MT: "MONTANA", NE: "NEBRASKA", NV: "NEVADA", NH: "NEW HAMPSHIRE",
-      NJ: "NEW JERSEY", NM: "NEW MEXICO", NY: "NEW YORK", NC: "NORTH CAROLINA",
-      ND: "NORTH DAKOTA", OH: "OHIO", OK: "OKLAHOMA", OR: "OREGON", PA: "PENNSYLVANIA",
-      RI: "RHODE ISLAND", SC: "SOUTH CAROLINA", SD: "SOUTH DAKOTA", TN: "TENNESSEE",
-      TX: "TEXAS", UT: "UTAH", VT: "VERMONT", VA: "VIRGINIA", WA: "WASHINGTON",
-      WV: "WEST VIRGINIA", WI: "WISCONSIN", WY: "WYOMING", DC: "DISTRICT OF COLUMBIA",
-    };
-
-    const recipients = profiles.filter((p) => {
-      if (!wantsEmail(p, "matching_swap")) return false;
-      if (excludeUserId && String(p.id) === String(excludeUserId)) return false;
-      if (!p.state) return false;
-      // Strict craft match required
-      if (!craftsMatchExactly(p.craft, swap.craft)) return false;
-      const abbr = String(p.state).toUpperCase();
-      const full = STATE_NAMES[abbr] || "";
-      const stateHit = hay.includes(abbr) || (full && hay.includes(full));
-      return stateHit;
-    });
-
-    console.log("[PostSwapDB] notifyMatchingSwap recipients (state+exact craft):", {
-      count: recipients.length,
-      swapCraft: swap.craft,
-    });
-
-    const queued = [];
-    const route = `${swap.current || "?"} → ${swap.desired || "?"}`;
-    for (const p of recipients) {
-      const subject = `New ${swap.craft} swap in ${p.state}`;
-      const body = [
-        `Hi ${p.name || "Carrier"},`,
-        "",
-        `A new mutual swap was posted in your state (${p.state}) for your craft:`,
-        route,
-        `Craft: ${swap.craft} (exact match to your profile)`,
-        `Seniority: ${swap.seniority != null ? swap.seniority : "—"} yrs`,
-        swap.notes ? `Note: ${swap.notes}` : "",
-        "",
-        `Browse Open Swaps on PostSwap to learn more or send a DM.`,
-        "",
-        `— PostSwap`,
-        `You only get these when craft matches yours exactly. Turn off in Profile → Email notifications.`,
-      ]
-        .filter(Boolean)
-        .join("\n");
-
-      try {
-        const row = await queueEmail({
-          toEmail: p.email,
-          toUserId: p.id,
-          subject,
-          body,
-          eventType: "matching_swap",
-          meta: {
-            swap_id: swap.id,
-            state: p.state,
-            craft: swap.craft,
-            profile_craft: p.craft,
-            craft_match: "exact",
-          },
-        });
-        queued.push({ email: p.email, id: row && row.id, craft: p.craft });
-      } catch (err) {
-        console.warn("[PostSwapDB] notifyMatchingSwap queue failed for", p.email, err);
-      }
-    }
-
-    const dispatch = queued.length ? await dispatchEmailQueue() : { skipped: true };
-    return { queued: queued.length, recipients: queued, dispatch };
-  }
-
-  /**
-   * Fully self-contained INSERT probe for swaps + messages.
-   * Uses direct fetch (does not depend on other helpers failing).
-   * Global: await window.PostSwapDB.testAnonInserts()
-   */
-  async function testAnonInserts() {
-    const stamp = new Date().toISOString();
-    console.log("%c[PostSwapDB] testAnonInserts() START", "color:#003087;font-weight:bold", stamp);
-    console.log("[PostSwapDB] project URL:", SUPABASE_URL);
-
-    const results = {
-      ok: false,
-      url: SUPABASE_URL,
-      at: stamp,
-      swaps: null,
-      messages: null,
-      summary: "",
-    };
-
-    // --- 1) INSERT into swaps ---
-    const swapPayload = {
-      current_location: "RLS Probe, NV",
-      desired_location: "RLS Probe Desired, AZ",
-      craft: "Letter Carrier",
-      seniority: 0,
-      notes: "Automated anon insert probe — safe to delete (" + stamp + ")",
-      user_id: "probe",
-      username: "probe",
-    };
-    console.log("[PostSwapDB] Step 1/2 — POST /swaps", swapPayload);
-
-    try {
-      const swapRes = await fetch(REST + "/swaps", {
-        method: "POST",
-        headers: {
-          apikey: SUPABASE_ANON_KEY,
-          Authorization: "Bearer " + SUPABASE_ANON_KEY,
-          "Content-Type": "application/json",
-          Prefer: "return=representation",
-        },
-        body: JSON.stringify(swapPayload),
-      });
-      const swapText = await swapRes.text();
-      let swapData = null;
-      try {
-        swapData = swapText ? JSON.parse(swapText) : null;
-      } catch (parseErr) {
-        swapData = swapText;
-      }
-
-      console.log("[PostSwapDB] swaps response", {
-        status: swapRes.status,
-        ok: swapRes.ok,
-        body: swapData,
-      });
-
-      if (!swapRes.ok) {
-        results.swaps = {
-          ok: false,
-          status: swapRes.status,
-          statusText: swapRes.statusText,
-          body: swapData,
-          hint:
-            swapRes.status === 401 || swapRes.status === 403
-              ? "RLS/auth blocked INSERT — disable RLS on public.swaps"
-              : swapRes.status === 400
-                ? "Bad payload — check column names"
-                : "See body for details",
-        };
-        console.error("[PostSwapDB] swaps INSERT FAILED", results.swaps);
-      } else {
-        const row = Array.isArray(swapData) ? swapData[0] : swapData;
-        results.swaps = {
-          ok: true,
-          status: swapRes.status,
-          id: row && row.id,
-          row: row,
-        };
-        console.log("%c[PostSwapDB] swaps INSERT OK id=" + (row && row.id), "color:green;font-weight:bold", row);
-      }
-    } catch (err) {
-      results.swaps = {
-        ok: false,
-        network: true,
-        message: err && err.message,
-        error: String(err),
-      };
-      console.error("[PostSwapDB] swaps INSERT network error", err);
-    }
-
-    // --- 2) INSERT into messages (for DMs) ---
-    const swapIdForMsg =
-      results.swaps && results.swaps.ok && results.swaps.id != null
-        ? String(results.swaps.id)
-        : "0";
-    const msgPayload = {
-      swap_id: swapIdForMsg,
-      from_user: "probe",
-      to_user: null,
-      message: "Automated anon message probe — safe to delete (" + stamp + ")",
-    };
-    const msgUrl = REST + "/" + MESSAGES_TABLE;
-    console.log("[PostSwapDB] Step 2/2 — POST messages (for DMs)", {
-      url: msgUrl,
-      payload: msgPayload,
-    });
-
-    try {
-      const msgRes = await fetch(msgUrl, {
-        method: "POST",
-        headers: Object.assign(
-          {
-            apikey: SUPABASE_ANON_KEY,
-            Authorization: "Bearer " + SUPABASE_ANON_KEY,
-            "Content-Type": "application/json",
-            Prefer: "return=representation",
-          },
-          participantKeysHeader(["probe"])
-        ),
-        body: JSON.stringify(msgPayload),
-      });
-      const msgText = await msgRes.text();
-      let msgData = null;
-      try {
-        msgData = msgText ? JSON.parse(msgText) : null;
-      } catch (parseErr) {
-        msgData = msgText;
-      }
-
-      console.log("[PostSwapDB] messages response", {
-        status: msgRes.status,
-        ok: msgRes.ok,
-        body: msgData,
-      });
-
-      if (!msgRes.ok) {
-        results.messages = {
-          ok: false,
-          status: msgRes.status,
-          statusText: msgRes.statusText,
-          body: msgData,
-          hint:
-            msgRes.status === 401 || msgRes.status === 403
-              ? 'RLS blocked INSERT — from_user must be listed in the x-postswap-keys header (see supabase-schema.sql).'
-              : "See body for details",
-        };
-        console.error("[PostSwapDB] messages INSERT FAILED", results.messages);
-      } else {
-        const row = Array.isArray(msgData) ? msgData[0] : msgData;
-        results.messages = {
-          ok: true,
-          status: msgRes.status,
-          id: row && row.id,
-          row: row,
-        };
-        console.log(
-          "%c[PostSwapDB] messages INSERT OK id=" + (row && row.id),
-          "color:green;font-weight:bold",
-          row
-        );
-      }
-    } catch (err) {
-      results.messages = {
-        ok: false,
-        network: true,
-        message: err && err.message,
-        error: String(err),
-      };
-      console.error("[PostSwapDB] messages INSERT network error", err);
-    }
-
-    results.ok = !!(results.swaps && results.swaps.ok && results.messages && results.messages.ok);
-    results.summary = results.ok
-      ? "PASS — anon can INSERT into swaps and messages"
-      : "FAIL — see swaps/messages details above (RLS, columns, or network)";
-
-    console.log(
-      "%c[PostSwapDB] testAnonInserts() DONE — " + results.summary,
-      results.ok ? "color:green;font-weight:bold" : "color:#B22234;font-weight:bold"
-    );
-    console.log("[PostSwapDB] testAnonInserts() DETAILED RESULTS:", results);
-    console.table({
-      swaps_ok: !!(results.swaps && results.swaps.ok),
-      swaps_id: results.swaps && results.swaps.id,
-      swaps_status: results.swaps && results.swaps.status,
-      messages_ok: !!(results.messages && results.messages.ok),
-      messages_id: results.messages && results.messages.id,
-      messages_status: results.messages && results.messages.status,
-    });
-
-    return results;
-  }
-
-  // Public API object
   const api = {
     BUILD: BUILD,
     SUPABASE_URL: SUPABASE_URL,
+    auth: auth,
     fetchSwaps: fetchSwaps,
     createSwap: createSwap,
     updateSwap: updateSwap,
@@ -1609,7 +1332,6 @@
     messagesTable: MESSAGES_TABLE,
     fetchMessages: fetchMessages,
     fetchMessagesForUser: fetchMessagesForUser,
-    fetchAllMessages: fetchAllMessages,
     fetchDmReadIds: fetchDmReadIds,
     saveDmReadIds: saveDmReadIds,
     fetchEmailQueueForUser: fetchEmailQueueForUser,
@@ -1623,67 +1345,21 @@
     fetchProfileByEmail: fetchProfileByEmail,
     fetchAllProfiles: fetchAllProfiles,
     saveProfile: saveProfile,
-    queueEmail: queueEmail,
     dispatchEmailQueue: dispatchEmailQueue,
     notifyNewDm: notifyNewDm,
     notifyMatchingSwap: notifyMatchingSwap,
     mapSwapFromDb: mapSwapFromDb,
     geocode: geocode,
-    testAnonInserts: testAnonInserts,
   };
 
-  // Force global exposure for DevTools / console
   global.PostSwapDB = api;
   if (typeof globalThis !== "undefined") {
     globalThis.PostSwapDB = api;
   }
   if (typeof window !== "undefined") {
     window.PostSwapDB = api;
-    try {
-      Object.defineProperty(window.PostSwapDB, "testAnonInserts", {
-        value: testAnonInserts,
-        writable: true,
-        configurable: true,
-        enumerable: true,
-      });
-    } catch (e) {
-      window.PostSwapDB.testAnonInserts = testAnonInserts;
-    }
-    window.testAnonInserts = function () {
-      return window.PostSwapDB.testAnonInserts();
-    };
   }
 
   console.log("PostSwapDB ready");
-  console.log("[PostSwapDB] build=" + BUILD, {
-    testAnonInserts: typeof api.testAnonInserts,
-    url: SUPABASE_URL,
-  });
+  console.log("[PostSwapDB] build=" + BUILD, { url: SUPABASE_URL });
 })(typeof window !== "undefined" ? window : globalThis);
-
-// Post-load guarantee
-(function bindTestAnonInsertsGlobal() {
-  if (typeof window === "undefined") return;
-  if (!window.PostSwapDB) {
-    console.error("[PostSwapDB] window.PostSwapDB is undefined after supabase.js load");
-    return;
-  }
-  if (typeof window.PostSwapDB.testAnonInserts !== "function") {
-    console.error(
-      "[PostSwapDB] testAnonInserts missing — keys:",
-      Object.keys(window.PostSwapDB)
-    );
-    return;
-  }
-  window.testAnonInserts = function testAnonInsertsAlias() {
-    return window.PostSwapDB.testAnonInserts();
-  };
-  console.log("PostSwapDB ready");
-  console.log(
-    "[PostSwapDB] build=" +
-      (window.PostSwapDB.BUILD || "?") +
-      " · Run: await PostSwapDB.testAnonInserts()"
-  );
-})();
-
-

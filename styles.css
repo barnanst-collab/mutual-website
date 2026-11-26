@@ -2992,7 +2992,8 @@ body.modal-open .bmc-float {
 #desired-region-fields[hidden],
 #desired-anywhere-note[hidden],
 .city-suggest[hidden],
-.form-error[hidden] {
+.form-error[hidden],
+.form-note[hidden] {
   display: none !important;
 }
 .city-field { position: relative; }
@@ -3036,6 +3037,14 @@ body.modal-open .bmc-float {
   font-size: 0.875rem;
   font-weight: 600;
 }
+.form-note,
+.form-help {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.form-help { text-align: left; }
 #use-location-btn { align-self: flex-start; }
 #desired-region-fields { display: flex; flex-direction: column; gap: 0.4rem; }
 

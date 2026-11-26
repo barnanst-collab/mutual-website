@@ -31,7 +31,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" crossorigin="" />
-  <link rel="stylesheet" href="styles.css?v=20261125fab" />
+  <link rel="stylesheet" href="styles.css?v=20261125auth" />
   <meta name="postswap-build" content="2026-09-30a" />
 </head>
 <body>
@@ -298,7 +298,7 @@
         <div class="guest-participate-banner" id="guest-participate-banner">
           <div class="guest-participate-copy">
             <strong>Browsing is public.</strong>
-            <span>Sign up free to post swaps, send DMs, and use My Messages.</span>
+            <span>Log in or join free to post / message.</span>
           </div>
           <div class="guest-participate-actions">
             <button type="button" class="btn btn-primary btn-sm" data-action="open-register">Sign up to participate</button>
@@ -701,18 +701,22 @@
       <div>
         <h2 id="login-title">Welcome back</h2>
         <p class="modal-sub">Log in to manage your swaps and message matches.</p>
+        <p class="form-note" id="login-note">First time logging in since the update? Tap Forgot password to set one. You don't need to sign up again.</p>
       </div>
       <button type="button" class="modal-close" data-action="close-modal" aria-label="Close">×</button>
     </div>
     <form id="form-login" class="modal-body form">
       <div class="form-row">
         <label for="login-email">Email</label>
-        <input type="email" id="login-email" placeholder="you@email.com" required />
+        <input type="email" id="login-email" placeholder="you@email.com" required autocomplete="username" />
       </div>
       <div class="form-row">
         <label for="login-password">Password</label>
-        <input type="password" id="login-password" placeholder="••••••••" required />
+        <input type="password" id="login-password" placeholder="••••••••" minlength="8" required autocomplete="current-password" />
+        <p class="form-help"><button type="button" class="link-btn" id="forgot-password">Forgot password</button></p>
       </div>
+      <p class="form-note" id="login-notice" hidden></p>
+      <p class="form-error" id="login-error" hidden></p>
       <button type="submit" class="btn btn-primary btn-lg btn-block">Log In</button>
       <p class="form-footer">New here? <button type="button" class="link-btn" data-action="open-register">Create an account</button></p>
     </form>
@@ -764,10 +768,36 @@
       </div>
       <div class="form-row">
         <label for="reg-password">Password</label>
-        <input type="password" id="reg-password" placeholder="Create a password" minlength="6" required />
+        <input type="password" id="reg-password" placeholder="At least 8 characters" minlength="8" required autocomplete="new-password" />
       </div>
+      <p class="form-note" id="register-note" hidden></p>
+      <p class="form-error" id="register-error" hidden></p>
       <button type="submit" class="btn btn-primary btn-lg btn-block">Create Account</button>
       <p class="form-footer">Already have an account? <button type="button" class="link-btn" data-action="open-login">Log in</button></p>
+    </form>
+  </div>
+
+  <!-- Set password (recovery link lands on /set-password) -->
+  <div class="modal modal-sm" id="modal-set-password" role="dialog" aria-labelledby="set-password-title" aria-modal="true" hidden>
+    <div class="modal-header">
+      <div>
+        <h2 id="set-password-title">Set your password</h2>
+        <p class="modal-sub">Choose a password for this PostSwap account.</p>
+      </div>
+      <button type="button" class="modal-close" data-action="close-modal" aria-label="Close">×</button>
+    </div>
+    <form id="form-set-password" class="modal-body form">
+      <div class="form-row">
+        <label for="set-password">New password</label>
+        <input type="password" id="set-password" minlength="8" required autocomplete="new-password" />
+      </div>
+      <div class="form-row">
+        <label for="set-password-confirm">Confirm password</label>
+        <input type="password" id="set-password-confirm" minlength="8" required autocomplete="new-password" />
+      </div>
+      <p class="form-error" id="set-password-error" hidden></p>
+      <button type="submit" class="btn btn-primary btn-lg btn-block">Save password</button>
+      <p class="form-footer"><button type="button" class="link-btn" data-action="open-login">Forgot password</button></p>
     </form>
   </div>
 
@@ -1120,20 +1150,15 @@
   <!-- cache-bust so hard refresh always gets latest scripts -->
   <script src="cities-us.js?v=20261124city"></script>
   <script src="geocode.js?v=20261124city"></script>
-  <script src="supabase.js?v=20261124loc"></script>
-  <script src="app.js?v=20261125nodemo"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+  <script src="supabase.js?v=20261125auth"></script>
+  <script src="app.js?v=20261125auth"></script>
   <script>
-    // Available immediately after page scripts load
     (function () {
-      if (window.PostSwapDB && typeof window.PostSwapDB.testAnonInserts === "function") {
-        console.log("PostSwapDB ready");
-        console.log(
-          "PostSwapDB build:",
-          window.PostSwapDB.BUILD,
-          "· await PostSwapDB.testAnonInserts()"
-        );
+      if (window.PostSwapDB && window.PostSwapDB.auth) {
+        console.log("PostSwapDB ready", window.PostSwapDB.BUILD);
       } else {
-        console.error("PostSwapDB / testAnonInserts missing", {
+        console.error("PostSwapDB missing", {
           PostSwapDB: window.PostSwapDB,
           keys: window.PostSwapDB ? Object.keys(window.PostSwapDB) : [],
         });

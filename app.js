@@ -1552,7 +1552,7 @@
         ? "Coming to " + (s.desired || "an open location")
         : "Leaving from " + (s.current || "an open location");
     const weak = pin.quality !== "city";
-    const verified = s.privacyLabel || "Verified Carrier";
+    const verified = s.privacyLabel || "PostSwap Member";
     return `
       <div class="popup-card">
         <h4>${escapeHtml(headline)}</h4>
@@ -3789,7 +3789,7 @@
       swapType,
       notes: notes || "Looking for a good mutual match.",
       region,
-      privacyLabel: `Verified Carrier • ${region}`,
+      privacyLabel: `PostSwap Member • ${region}`,
       ownerId: sessionId,
       status: "open",
       justAdded: true,

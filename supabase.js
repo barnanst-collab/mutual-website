@@ -355,8 +355,8 @@
       desiredLng,
       region,
       privacyLabel: username
-        ? `Verified Carrier • ${username}`
-        : `Verified Carrier • ${region}`,
+        ? `PostSwap Member • ${username}`
+        : `PostSwap Member • ${region}`,
       ownerId: row.user_id || null,
       username: username,
       createdAt: row.created_at || null,

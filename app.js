@@ -4008,14 +4008,13 @@
     console.log("[PostSwap] handlePost: done", {
       savedRemote,
       id: newSwap.id,
+      locationColumnsMissing: !!newSwap.locationColumnsMissing,
       postError: postError && postError.message,
     });
 
     showToast(
       savedRemote ? "Swap posted to cloud!" : "Swap posted!",
-      newSwap.locationColumnsMissing
-        ? "The listing is saved. Add the location columns in Supabase so city, state, and coordinates are stored too."
-        : `You're live, ${user.name.split(" ")[0]}. Check My Swaps anytime.`
+      `You're live, ${user.name.split(" ")[0]}. Check My Swaps anytime.`
     );
 
     // Email carriers: same home state AND exact craft match only
@@ -4093,11 +4092,12 @@
       setButtonLoading(submitBtn, false);
       if (els.formPost) els.formPost.reset();
       openMySwaps(savedId);
+      if (next.locationColumnsMissing) {
+        console.log("[PostSwap] edit swap: location columns were not stored; city text stays on current_location/desired_location");
+      }
       showToast(
         "Swap updated",
-        next.locationColumnsMissing
-          ? "Details saved. Add the location columns in Supabase so city and coordinates are stored too."
-          : "The public map shows the new details if this listing is still open."
+        "The public map shows the new details if this listing is still open."
       );
     } catch (err) {
       console.error("[PostSwap] edit swap failed", err);

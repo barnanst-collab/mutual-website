@@ -188,9 +188,13 @@
     shareMessage: $("#share-message"),
     shareCopyMsg: $("#share-copy-msg"),
     shareCopyLink: $("#share-copy-link"),
+    shareCopyFacebook: $("#share-copy-facebook"),
     shareEmail: $("#share-email"),
     shareGroup: $("#share-group"),
     shareStatus: $("#share-status"),
+    postLive: $("#post-live"),
+    postLivePreview: $("#post-live-preview"),
+    postLiveCopy: $("#post-live-copy"),
     formPost: $("#form-post"),
     formLogin: $("#form-login"),
     formRegister: $("#form-register"),
@@ -1519,6 +1523,40 @@
     );
   }
 
+  function clipFacebookNote(text) {
+    const clean = String(text || "").replace(/\s+/g, " ").trim();
+    if (!clean) return "";
+    const max = 160;
+    if (clean.length <= max) return clean;
+    let cut = clean.slice(0, max);
+    const space = cut.lastIndexOf(" ");
+    if (space >= 100) cut = cut.slice(0, space);
+    cut = cut.replace(/[\s,;:.!\-–—]+$/, "");
+    return cut + "…";
+  }
+
+  function buildFacebookPostText(s) {
+    const swap = s || {};
+    const lines = [
+      "📬 Mutual Swap Wanted: " + String(swap.craft || "").trim(),
+      "📍 Currently in: " + String(swap.current || "").trim(),
+      "🎯 Looking for: " + String(swap.desired || "").trim(),
+    ];
+    if (
+      swap.seniority != null &&
+      String(swap.seniority).trim() !== "" &&
+      Number.isFinite(Number(swap.seniority))
+    ) {
+      lines.push("📅 Seniority: " + formatSeniority(swap.seniority));
+    }
+    const note = clipFacebookNote(swap.notes);
+    if (note) lines.push("💬 " + note);
+    lines.push("");
+    lines.push("Message me or view details on PostSwap (100% free):");
+    lines.push(shareUrlFor(swap));
+    return lines.join("\n");
+  }
+
   function shareTruckIcon() {
     return `<svg class="share-truck-icon" viewBox="0 0 40 28" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
       <rect x="2" y="8" width="26" height="14" rx="2.5" fill="#FFFFFF" stroke="#003087" stroke-width="1.8"/>
@@ -2768,6 +2806,7 @@
 
   let shareSwap = null;
   let shareMode = "swap"; // "swap" | "site"
+  let postLiveSwap = null;
   const SITE_URL = "https://post-swap.com";
   const SITE_SHARE_TEXT =
     "Hey — check out PostSwap, a free site for USPS carriers to find mutual route/station transfers. " +
@@ -2821,6 +2860,7 @@
           "Paste into a text, carrier group chat, or union thread — mutual swaps help everyone keep seniority & benefits.";
       }
     }
+    if (els.shareCopyFacebook) els.shareCopyFacebook.hidden = mode !== "swap";
     setShareStatus("");
   }
 
@@ -2857,25 +2897,85 @@
   }
 
   async function copyText(text, successMsg) {
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(text);
-      } else {
-        const ta = document.createElement("textarea");
-        ta.value = text;
-        ta.setAttribute("readonly", "");
-        ta.style.position = "fixed";
-        ta.style.left = "-9999px";
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand("copy");
-        ta.remove();
-      }
+    const ok = await copyToClipboard(text);
+    if (ok) {
       setShareStatus(successMsg);
       showToast("Copied!", successMsg);
-    } catch (_) {
-      setShareStatus("Couldn’t copy automatically — select the text above and copy.");
+      return;
     }
+    setShareStatus("Couldn’t copy automatically — select the text above and copy.");
+  }
+
+  async function copyToClipboard(text) {
+    const value = String(text == null ? "" : text);
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      try {
+        await navigator.clipboard.writeText(value);
+        return true;
+      } catch (_) {
+        /* textarea fallback below */
+      }
+    }
+    let ta = null;
+    try {
+      ta = document.createElement("textarea");
+      ta.value = value;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.top = "0";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      if (typeof ta.setSelectionRange === "function") ta.setSelectionRange(0, value.length);
+      return !!document.execCommand("copy");
+    } catch (_) {
+      return false;
+    } finally {
+      if (ta && ta.parentNode) ta.parentNode.removeChild(ta);
+    }
+  }
+
+  function flashCopiedLabel(btn) {
+    if (!btn) return;
+    const label = btn.querySelector("span") || btn;
+    if (!label.getAttribute("data-copy-original")) {
+      label.setAttribute("data-copy-original", label.textContent);
+    }
+    label.textContent = "Copied!";
+    if (label._copyTimer) clearTimeout(label._copyTimer);
+    label._copyTimer = setTimeout(function () {
+      label.textContent = label.getAttribute("data-copy-original") || "Copy for Facebook";
+      label._copyTimer = null;
+    }, 1800);
+  }
+
+  function resetCopiedLabel(btn) {
+    if (!btn) return;
+    const label = btn.querySelector("span") || btn;
+    if (label._copyTimer) {
+      clearTimeout(label._copyTimer);
+      label._copyTimer = null;
+    }
+    const original = label.getAttribute("data-copy-original");
+    if (original) label.textContent = original;
+  }
+
+  async function copyFacebookPost(swap, btn) {
+    if (!swap) return false;
+    const text = buildFacebookPostText(swap);
+    const ok = await copyToClipboard(text);
+    if (!ok) {
+      if (btn && els.shareCopyFacebook && btn === els.shareCopyFacebook && els.shareMessage) {
+        els.shareMessage.value = text;
+        setShareStatus("Couldn’t copy automatically — select the text above and copy.");
+      }
+      showToast("Couldn’t copy", "Select the post and copy it by hand.");
+      return false;
+    }
+    flashCopiedLabel(btn);
+    showToast("Copied!", "Paste it into your USPS Facebook group.");
+    return true;
   }
 
   function openModal(modal) {
@@ -2991,6 +3091,7 @@
           <p style="margin-top:0.45rem">${open ? "On the public map. Replies are in My Messages." : "Hidden from the public map. Still saved here."}</p>
           <div class="my-swap-actions">
             <button type="button" class="btn btn-primary btn-sm" data-swap-edit="${escapeHtml(String(s.id))}">Edit</button>
+            ${open ? `<button type="button" class="btn btn-outline btn-sm" data-swap-facebook="${escapeHtml(String(s.id))}"><span>Copy for Facebook</span></button>` : ""}
             ${open ? `<button type="button" class="btn btn-outline btn-sm" data-swap-close="${escapeHtml(String(s.id))}">Close / Mark as swapped</button>` : ""}
             <button type="button" class="btn btn-ghost btn-sm" data-swap-delete="${escapeHtml(String(s.id))}">Delete</button>
           </div>
@@ -3322,7 +3423,36 @@
     if (box) box.hidden = false;
   }
 
+  function hidePostLive() {
+    postLiveSwap = null;
+    if (els.postLive) els.postLive.hidden = true;
+    if (els.formPost) els.formPost.hidden = false;
+    resetCopiedLabel(els.postLiveCopy);
+  }
+
+  function showPostLive(swap) {
+    postLiveSwap = swap;
+    if (els.formPost) els.formPost.hidden = true;
+    if (els.postLivePreview) els.postLivePreview.value = buildFacebookPostText(swap);
+    if (els.postLive) els.postLive.hidden = false;
+    const title = $("#post-title");
+    const sub = $("#post-sub");
+    if (title) title.textContent = "Your swap is live!";
+    if (sub) sub.textContent = "It's on the map. Copy this into your USPS Facebook group.";
+    resetCopiedLabel(els.postLiveCopy);
+    if (els.postLiveCopy) {
+      setTimeout(function () {
+        try {
+          els.postLiveCopy.focus({ preventScroll: true });
+        } catch (_) {
+          els.postLiveCopy.focus();
+        }
+      }, 50);
+    }
+  }
+
   function setPostMode(mode) {
+    hidePostLive();
     const title = $("#post-title");
     const sub = $("#post-sub");
     const label = document.querySelector("#post-submit-btn .btn-label");
@@ -3850,12 +3980,13 @@
     newSwap = withPinCoords(newSwap);
     swaps.unshift(newSwap);
     setButtonLoading(submitBtn, false);
-    closeAllModals();
     els.formPost.reset();
     syncDesiredMode();
     hideLocationError();
     const permanent = els.formPost.querySelector('input[name="swapType"][value="Permanent"]');
     if (permanent) permanent.checked = true;
+    if (savedRemote) showPostLive(newSwap);
+    else closeAllModals();
 
     els.filterCity.value = "";
     els.filterCraft.value = "";
@@ -4214,6 +4345,18 @@
         copyText(p.groupText, "Group-chat text copied — paste into your carrier group.");
       });
     }
+    if (els.shareCopyFacebook) {
+      els.shareCopyFacebook.addEventListener("click", function () {
+        if (shareMode !== "swap" || !shareSwap) return;
+        copyFacebookPost(shareSwap, els.shareCopyFacebook);
+      });
+    }
+    if (els.postLiveCopy) {
+      els.postLiveCopy.addEventListener("click", function () {
+        if (!postLiveSwap) return;
+        copyFacebookPost(postLiveSwap, els.postLiveCopy);
+      });
+    }
 
     // Keyboard on cards
     els.swapList.addEventListener("keydown", (e) => {
@@ -4359,10 +4502,12 @@
         const editBtn = e.target.closest("[data-swap-edit]");
         const closeBtn = e.target.closest("[data-swap-close]");
         const deleteBtn = e.target.closest("[data-swap-delete]");
-        if (!editBtn && !closeBtn && !deleteBtn) return;
+        const facebookBtn = e.target.closest("[data-swap-facebook]");
+        if (!editBtn && !closeBtn && !deleteBtn && !facebookBtn) return;
         e.preventDefault();
         e.stopPropagation();
-        if (editBtn) startEditSwap(editBtn.getAttribute("data-swap-edit"));
+        if (facebookBtn) copyFacebookPost(findSwapById(facebookBtn.getAttribute("data-swap-facebook")), facebookBtn);
+        else if (editBtn) startEditSwap(editBtn.getAttribute("data-swap-edit"));
         else if (closeBtn) closeOwnSwap(closeBtn.getAttribute("data-swap-close"));
         else deleteOwnSwap(deleteBtn.getAttribute("data-swap-delete"));
       });

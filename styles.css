@@ -2533,6 +2533,23 @@ textarea { resize: vertical; min-height: 90px; }
   background: var(--card);
   color: var(--usps-blue);
 }
+.share-facebook {
+  grid-column: 1 / -1;
+  background: var(--usps-blue);
+  color: #fff;
+  border-color: var(--usps-blue);
+}
+.share-facebook:hover {
+  background: var(--usps-blue-hover);
+  color: #fff;
+  border-color: var(--usps-blue-hover);
+}
+/* .form and .share-action-btn set display, which beats the hidden attribute. */
+#form-post[hidden],
+#post-live[hidden],
+#share-copy-facebook[hidden] {
+  display: none !important;
+}
 .share-foot {
   min-height: 1.25rem;
   font-size: 0.8rem;
@@ -3195,6 +3212,46 @@ body.modal-open .bmc-float {
   flex-wrap: wrap;
   gap: 0.45rem;
   margin-top: 0.75rem;
+}
+.my-swap-actions .btn {
+  max-width: 100%;
+  white-space: normal;
+  text-align: center;
+}
+.post-live {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+.post-live-lead {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+.post-live-preview {
+  min-height: 11.5rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.post-live-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+@media (max-width: 480px) {
+  .my-swap-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+  .my-swap-actions .btn {
+    width: 100%;
+    justify-content: center;
+  }
+  .post-live-preview {
+    min-height: 9.5rem;
+    font-size: 0.85rem;
+  }
 }
 .swap-duplicate {
   border: 1px solid var(--usps-blue);
